@@ -1,6 +1,7 @@
-def main():
-    print("Hello from miniredis!")
+import asyncio
+
+from miniredis.server import main
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
