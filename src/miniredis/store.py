@@ -1,10 +1,19 @@
 import time
 import math
+import asyncio
+
+from miniredis.custom_data_structures import RandomDict
 
 class Store:
     def __init__(self):
         self._data: dict[bytes, bytes] = {}
-        self._ttl: dict[bytes, float] = {}
+        self._ttl = RandomDict()
+    
+    def sample_and_expire(self) -> None:
+        sample = self._ttl.get_sample(10)
+
+        if sample:
+            self.exists(*sample)
     
     def get(self, key: bytes) -> bytes | None:
         if self.exists(key):
@@ -17,6 +26,8 @@ class Store:
 
         if ttl:
             self.expire(key, ttl/1000)
+        else:
+            self._ttl.delete(key)
     
     def delete(self, *keys: bytes) -> int:
         count = 0
@@ -24,7 +35,7 @@ class Store:
         for key in keys:
             if self.exists(key):
                 del self._data[key]
-                self._ttl.pop(key, None)
+                self._ttl.delete(key)
                 count += 1
 
         return count
@@ -36,7 +47,7 @@ class Store:
             if key in self._data:
                 if self._ttl.get(key, float('inf')) < time.time():
                     del self._data[key]
-                    del self._ttl[key]
+                    self._ttl.delete(key)
                 else:
                     count += 1
         
@@ -75,23 +86,27 @@ class Store:
         if not self.exists(key):
             return 0
         
-        self._ttl[key] = time.time() + ttl
+        self._ttl.set(key, time.time() + ttl)
         return 1
     
     def ttl(self, key: bytes) -> int:
         if not self.exists(key):
             return -2
-        elif key not in self._ttl:
+        elif not self._ttl.get(key):
             return -1
         else:
-            return math.floor(self._ttl[key])
+            return math.floor(self._ttl.get(key))
         
     def persist(self, key: bytes) -> int:
-        if not self.exists(key) or key not in self._ttl:
+        if not self.exists(key) or not self._ttl.get(key):
             return 0
         
-        del self._ttl[key]
+        self._ttl.delete(key)
         return 1
 
+async def expiration_sweeper(store: Store) -> None:
+    while True:
+        await asyncio.sleep(1)
+        store.sample_and_expire()
 
 store = Store()

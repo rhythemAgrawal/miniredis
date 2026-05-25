@@ -36,7 +36,7 @@ async def set(argv: list[bytes]) -> bytes:
             ttl *= 1000
         
         store.set(argv[0], argv[1], ttl)
-        
+        return encode_simple_string("OK")
     
     return encode_error("ERR Wrong number of arguements for SET command")
 
