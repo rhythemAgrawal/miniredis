@@ -9,8 +9,7 @@ def encode_error(msg: str) -> bytes:
     return encoded.encode()
 
 def encode_integer(n: int) -> bytes:
-    sign = "+" if n>=0 else "-"
-    encoded = ":" + sign + str(abs(n)) + "\r\n"
+    encoded = ":" + str(n) + "\r\n"
     return encoded.encode()
 
 def encode_bulk_string(s: bytes | None) -> bytes:
@@ -37,5 +36,5 @@ async def read_command(reader: asyncio.StreamReader) -> list[bytes]:
         cmd_arg = await reader.readexactly(byte_length)
         decoded.append(cmd_arg)
         crlf = await reader.readexactly(2)
-    
+
     return decoded
