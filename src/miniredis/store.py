@@ -7,7 +7,7 @@ from miniredis.custom_data_structures import RandomDict
 
 class Store:
     def __init__(self):
-        self._data: dict[bytes, bytes | deque] = {}
+        self._data: dict[bytes, bytes | deque[bytes] | dict[bytes, bytes]] = {}
         self._ttl = RandomDict()
     
     def sample_and_expire(self) -> None:
@@ -15,6 +15,14 @@ class Store:
 
         if sample:
             self.exists(*sample)
+    
+    def is_valid_value_type(self, key: bytes, allowed_type: type) -> bool:
+        value = self._data.get(key) if self.exists(key) else None
+
+        if not value:
+            return True
+        
+        return type(value) == allowed_type
     
     def get(self, key: bytes) -> bytes | None:
         if self.exists(key):
@@ -175,6 +183,17 @@ class Store:
     def llen(self, key: bytes) -> int:
         curr = self._list_get(key) or deque()
         return len(curr)
+    
+    def hget(self, key: bytes, field: bytes) -> bytes | None:
+        if not self.exists(key):
+            return
+        
+        value = self._data.get(key)
+
+        if field not in value:
+            return
+        
+        return value.get(field)
 
 
 async def expiration_sweeper(store: Store) -> None:

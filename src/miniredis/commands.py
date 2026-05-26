@@ -1,4 +1,6 @@
-from miniredis.protocol import encode_error, encode_simple_string, encode_bulk_string, encode_integer
+from collections import deque
+
+from miniredis.protocol import encode_error, encode_simple_string, encode_bulk_string, encode_integer, encode_array
 from miniredis.store import store
 
 
@@ -137,23 +139,109 @@ async def persist(argv: list[bytes]) -> bytes:
     
     return encode_integer(store.persist(argv[0]))
 
+async def lpush(argv: list[bytes]) -> bytes:
+    if len(argv) < 2:
+        return encode_error("ERR Wrong number of arguements for LPUSH command")
+    
+    return encode_integer(store.lpush(argv[0], argv[1:]))
+
+async def rpush(argv: list[bytes]) -> bytes:
+    if len(argv) < 2:
+        return encode_error("ERR Wrong number of arguements for RPUSH command")
+    
+    return encode_integer(store.rpush(argv[0], argv[1:]))
+
+async def lpop(argv: list[bytes]) -> bytes:
+    if len(argv) > 2:
+        return encode_error("ERR Wrong number of arguements for LPOP command")
+    
+    count = 1
+    
+    if len(argv) == 2:
+        try:
+            count = int(argv[1].decode())
+
+            if count <= 0:
+                return encode_error("ERR Invalid value for count for LPOP command")
+        except ValueError:
+            return encode_error("ERR Invalid data type for count for LPOP command")
+    
+    popped = store.lpop(argv[0], count=count)
+
+    if popped:
+        if len(argv) == 2:
+            return encode_array(popped)
+        else:
+            return encode_bulk_string(popped[0])
+    
+    return encode_bulk_string(None)
+
+async def rpop(argv: list[bytes]) -> bytes:
+    if len(argv) > 2:
+        return encode_error("ERR Wrong number of arguements for RPOP command")
+    
+    count = 1
+    
+    if len(argv) == 2:
+        try:
+            count = int(argv[1].decode())
+
+            if count <= 0:
+                return encode_error("ERR Invalid value for count for RPOP command")
+        except ValueError:
+            return encode_error("ERR Invalid data type for count for RPOP command")
+    
+    popped = store.rpop(argv[0], count=count)
+
+    if popped:
+        if len(argv) == 2:
+            return encode_array(popped)
+        else:
+            return encode_bulk_string(popped[0])
+    
+    return encode_bulk_string(None)
+
+async def lrange(argv: list[bytes]) -> bytes:
+    if len(argv) != 3:
+        return encode_error("ERR Wrong number of arguements for LRANGE command")
+    
+    try:
+        start = int(argv[1].decode())
+        end = int(argv[2].decode())
+    except ValueError:
+        return encode_error("ERR Invalid arguments for the LRANGE command")
+    
+    return encode_array(store.lrange(argv[0], start, end))
+
+async def llen(argv: list[bytes]) -> bytes:
+    if len(argv) != 1:
+        return encode_error("ERR Wrong number of arguements for LLEN command")
+    
+    return encode_integer(store.llen(argv[0]))
+
 
 COMMANDS = {
-    b"PING": ping,
-    b"ECHO": echo,
-    b"GET": get,
-    b"SET": set,
-    b"DEL": delete,
-    b"EXISTS": exists,
-    b"INCRBY": incrby,
-    b"DECRBY": decrby,
-    b"INCR": incr,
-    b"DECR": decr,
-    b"APPEND": append,
-    b"STRLEN": strlen,
-    b"EXPIRE": expire,
-    b"TTL": ttl,
-    b"PERSIST": persist
+    b"PING": [ping, True],
+    b"ECHO": [echo, True],
+    b"GET": [get, str],
+    b"SET": [set, str],
+    b"DEL": [delete, True],
+    b"EXISTS": [exists, True],
+    b"INCRBY": [incrby, str],
+    b"DECRBY": [decrby, str],
+    b"INCR": [incr, str],
+    b"DECR": [decr, str],
+    b"APPEND": [append, str],
+    b"STRLEN": [strlen, str],
+    b"EXPIRE": [expire, True],
+    b"TTL": [ttl, True],
+    b"PERSIST": [persist, True],
+    b"LPUSH": [lpush, deque],
+    b"RPUSH": [rpush, deque],
+    b"LPOP": [lpop, deque],
+    b"RPOP": [rpop, deque],
+    b"LRANGE": [lrange, deque],
+    b"LLEN": [llen, deque]
 }
 
 async def dispatch(command_args: list[bytes]) -> bytes:
@@ -166,4 +254,7 @@ async def dispatch(command_args: list[bytes]) -> bytes:
     if not command_handler:
         return encode_error(f"ERR Invalid command '{command_name.decode()}'")
     
-    return await command_handler(command_args[1:])
+    if command_handler[1] is not True and not store.is_valid_value_type(command_args[1], command_handler[1]):
+        return encode_error("WRONGTYPE Operation against a key holding the wrong kind of value")
+    
+    return await command_handler[0](command_args[1:])
