@@ -3,12 +3,13 @@ import socket
 import subprocess
 import time
 import pytest
+import sys
 
 
 @pytest.fixture
 def miniredis_server():
     # Start your server as a separate process
-    proc = subprocess.Popen(["python", "-m", "miniredis"])
+    proc = subprocess.Popen([sys.executable, "-m", "miniredis"])
 
     # Wait until it's actually accepting connections
     _wait_for_port("127.0.0.1", 6380, timeout=5.0)

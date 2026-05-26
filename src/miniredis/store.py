@@ -21,11 +21,11 @@ class Store:
         
         return None
 
-    def set(self, key: bytes, value: bytes, ttl: int | None = None) -> None:
+    def set(self, key: bytes, value: bytes, ttl: float | None = None) -> None:
         self._data[key] = value
 
-        if ttl:
-            self.expire(key, ttl/1000)
+        if ttl is not None:
+            self.expire(key, ttl)
         else:
             self._ttl.delete(key)
     
@@ -57,7 +57,7 @@ class Store:
         curr = self.get(key)
         curr_val = 0 if curr is None else int(curr.decode())
         new_val = curr_val + delta
-        self.set(key, str(new_val).encode())
+        self._data[key] = str(new_val).encode()
         return new_val
     
     def incr_by(self, key: bytes, incr_count: int) -> int:
@@ -75,7 +75,7 @@ class Store:
     def append(self, key: bytes, value: bytes) -> int:
         curr = self._data.get(key) or b""
         new_val = curr + value
-        self.set(key, new_val)
+        self._data[key] = new_val
         return len(new_val)
     
     def strlen(self, key: bytes) -> int:
@@ -95,7 +95,7 @@ class Store:
         elif not self._ttl.get(key):
             return -1
         else:
-            return math.floor(self._ttl.get(key))
+            return math.floor(self._ttl.get(key) - time.time())
         
     def persist(self, key: bytes) -> int:
         if not self.exists(key) or not self._ttl.get(key):

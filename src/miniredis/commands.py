@@ -32,8 +32,11 @@ async def set(argv: list[bytes]) -> bytes:
         except ValueError:
             return encode_error("ERR Wrong ttl type")
         
-        if argv[2].upper() == "EX":
-            ttl *= 1000
+        if argv[2].upper() == b"PX":
+            ttl /= 1000
+        
+        if ttl <= 0:
+            return encode_error("ERR invalid expire time in SET command")
         
         store.set(argv[0], argv[1], ttl)
         return encode_simple_string("OK")
@@ -112,7 +115,15 @@ async def expire(argv: list[bytes]) -> bytes:
     if len(argv) != 2:
         return encode_error("ERR Wrong number of arguements for EXPIRE command")
     
-    return encode_integer(store.expire(argv[0], float(argv[1].decode())))
+    try:
+        ttl = float(argv[1].decode())
+    except ValueError:
+        return encode_error("ERR Wrong ttl type")
+    
+    if ttl <= 0:
+        return encode_error("ERR Invalid ttl value for EXPIRE command")
+    
+    return encode_integer(store.expire(argv[0], ttl))
 
 async def ttl(argv: list[bytes]) -> bytes:
     if len(argv) != 1:
@@ -153,6 +164,6 @@ async def dispatch(command_args: list[bytes]) -> bytes:
     command_handler = COMMANDS.get(command_name)
 
     if not command_handler:
-        return encode_error("ERR Invalid command '{command_name}'")
+        return encode_error(f"ERR Invalid command '{command_name.decode()}'")
     
     return await command_handler(command_args[1:])

@@ -1,5 +1,9 @@
 import asyncio
 
+
+class ProtocolError(Exception):
+    pass
+
 def encode_simple_string(s: str) -> bytes:
     encoded = "+" + s + "\r\n"
     return encoded.encode()
@@ -36,5 +40,8 @@ async def read_command(reader: asyncio.StreamReader) -> list[bytes]:
         cmd_arg = await reader.readexactly(byte_length)
         decoded.append(cmd_arg)
         crlf = await reader.readexactly(2)
+
+        if crlf != b"\r\n":
+            raise ProtocolError(f"expected CRLF after the bulk string, got {crlf!r}")
 
     return decoded

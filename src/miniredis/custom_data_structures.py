@@ -23,11 +23,12 @@ class RandomDict:
             return
         
         del self._data[key]
-        index = self._pos[key]
+        index = self._pos.pop(key)
         self._keys[index], self._keys[-1] = self._keys[-1], self._keys[index]
         self._keys.pop()
-        self._pos[self._keys[index]] = index
-        del self._pos[key]
+
+        if len(self._keys):
+            self._pos[self._keys[index]] = index
 
     def get_sample(self, count: int) -> list[bytes]:
         sample_size = min(count, len(self._keys))
