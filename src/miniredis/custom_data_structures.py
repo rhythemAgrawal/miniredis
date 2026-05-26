@@ -27,7 +27,10 @@ class RandomDict:
         self._keys[index], self._keys[-1] = self._keys[-1], self._keys[index]
         self._keys.pop()
 
-        if len(self._keys):
+        # Only relocate when we removed an interior element. If we removed the
+        # tail, `index` now equals the new length (out of range) and there is
+        # nothing to move.
+        if index < len(self._keys):
             self._pos[self._keys[index]] = index
 
     def get_sample(self, count: int) -> list[bytes]:

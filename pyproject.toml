@@ -14,5 +14,11 @@ dev = [
     "redis>=7.4.0",
 ]
 
+[tool.pytest.ini_options]
+# "auto" => any `async def test_*` runs as an asyncio test without needing an
+# explicit @pytest.mark.asyncio marker on every coroutine test.
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/miniredis"]

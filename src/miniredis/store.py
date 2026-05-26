@@ -1,12 +1,13 @@
 import time
 import math
 import asyncio
+from collections import deque
 
 from miniredis.custom_data_structures import RandomDict
 
 class Store:
     def __init__(self):
-        self._data: dict[bytes, bytes] = {}
+        self._data: dict[bytes, bytes | deque] = {}
         self._ttl = RandomDict()
     
     def sample_and_expire(self) -> None:
@@ -73,13 +74,13 @@ class Store:
         return self.decr_by(key, 1)
     
     def append(self, key: bytes, value: bytes) -> int:
-        curr = self._data.get(key) or b""
+        curr = self._data.get(key) if self.exists(key) else b""
         new_val = curr + value
         self._data[key] = new_val
         return len(new_val)
     
     def strlen(self, key: bytes) -> int:
-        value = self._data.get(key) or b""
+        value = self._data.get(key) if self.exists(key) else b""
         return len(value)
     
     def expire(self, key: bytes, ttl: int | float) -> int:
@@ -103,6 +104,78 @@ class Store:
         
         self._ttl.delete(key)
         return 1
+    
+    def _list_get(self, key: bytes) -> deque | None:
+        curr = None
+
+        if self.exists(key):
+            curr = self._data.get(key)
+
+        return curr
+    
+    def lpush(self, key: bytes, elements: list[bytes]) -> int:
+        curr = self._list_get(key)
+
+        if not curr:
+            self._data[key] = deque()
+            curr = self._data[key]
+
+        curr.extendleft(elements)
+        return len(curr)
+    
+    def rpush(self, key: bytes, elements: list[bytes]) -> int:
+        curr = self._list_get(key)
+
+        if not curr:
+            self._data[key] = deque()
+            curr = self._data[key]
+
+        curr.extend(elements)
+        return len(curr)
+    
+    def lpop(self, key: bytes, count: int=1) -> list[bytes]:
+        curr = self._list_get(key)
+        popped = []
+
+        if not curr:
+            return popped
+        
+        pop_count = min(count, len(curr))
+
+        for _ in range(pop_count):
+            popped.append(curr.popleft())
+        
+        if not len(curr):
+            self.delete(key)
+        
+        return popped
+    
+    def rpop(self, key: bytes, count: int=1) -> list[bytes]:
+        curr = self._list_get(key)
+        popped = []
+
+        if not curr:
+            return popped
+        
+        pop_count = min(count, len(curr))
+
+        for _ in range(pop_count):
+            popped.append(curr.pop())
+        
+        if not len(curr):
+            self.delete(key)
+        
+        return popped
+    
+    def lrange(self, key: bytes, start: int, end: int) -> list[bytes]:
+        curr = list(self._list_get(key) or deque())
+        end = len(curr) if end == -1 else end+1
+        return curr[start:end]
+    
+    def llen(self, key: bytes) -> int:
+        curr = self._list_get(key) or deque()
+        return len(curr)
+
 
 async def expiration_sweeper(store: Store) -> None:
     while True:
