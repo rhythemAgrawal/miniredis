@@ -73,6 +73,11 @@ class TestEncoders:
     def test_empty_array(self):
         assert encode_array([]) == b"*0\r\n"
 
+    def test_null_array(self):
+        # Distinct from an empty array; used by LPOP/RPOP with a count on a
+        # missing key.
+        assert encode_array(None) == b"*-1\r\n"
+
 
 # --- parser --------------------------------------------------------------
 

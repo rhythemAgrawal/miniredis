@@ -1,4 +1,6 @@
 from collections import deque
+from collections.abc import Awaitable, Callable
+from typing import NamedTuple
 
 from miniredis.protocol import encode_error, encode_simple_string, encode_bulk_string, encode_integer, encode_array
 from miniredis.store import store
@@ -168,13 +170,10 @@ async def lpop(argv: list[bytes]) -> bytes:
     
     popped = store.lpop(argv[0], count=count)
 
-    if popped:
-        if len(argv) == 2:
-            return encode_array(popped)
-        else:
-            return encode_bulk_string(popped[0])
-    
-    return encode_bulk_string(None)
+    if len(argv) == 2:
+        return encode_array(popped if popped is None else [encode_bulk_string(element) for element in popped])
+    else:
+        return encode_bulk_string(popped if popped is None else popped[0])
 
 async def rpop(argv: list[bytes]) -> bytes:
     if len(argv) > 2:
@@ -193,13 +192,10 @@ async def rpop(argv: list[bytes]) -> bytes:
     
     popped = store.rpop(argv[0], count=count)
 
-    if popped:
-        if len(argv) == 2:
-            return encode_array(popped)
-        else:
-            return encode_bulk_string(popped[0])
-    
-    return encode_bulk_string(None)
+    if len(argv) == 2:
+        return encode_array(popped if popped is None else [encode_bulk_string(element) for element in popped])
+    else:
+        return encode_bulk_string(popped if popped is None else popped[0])
 
 async def lrange(argv: list[bytes]) -> bytes:
     if len(argv) != 3:
@@ -211,7 +207,7 @@ async def lrange(argv: list[bytes]) -> bytes:
     except ValueError:
         return encode_error("ERR Invalid arguments for the LRANGE command")
     
-    return encode_array(store.lrange(argv[0], start, end))
+    return encode_array([encode_bulk_string(element) for element in store.lrange(argv[0], start, end)])
 
 async def llen(argv: list[bytes]) -> bytes:
     if len(argv) != 1:
@@ -226,7 +222,7 @@ async def hget(argv: list[bytes]) -> bytes:
     return encode_bulk_string(store.hget(argv[0], argv[1]))
 
 async def hset(argv: list[bytes]) -> bytes:
-    if len(argv) < 3 or len(argv) % 2 == 1:
+    if len(argv) < 3 or len(argv) % 2 == 0:
         return encode_error("ERR Wrong number of arguements for HSET command")
     
     return encode_integer(store.hset(argv[0], argv[1:]))
@@ -241,19 +237,19 @@ async def hgetall(argv: list[bytes]) -> bytes:
     if len(argv) != 1:
         return encode_error("ERR Wrong number of arguements for HGETALL command")
     
-    return encode_array(store.hgetall(argv[0]))
+    return encode_array([encode_bulk_string(element) for element in store.hgetall(argv[0])])
 
 async def hkeys(argv: list[bytes]) -> bytes:
     if len(argv) != 1:
         return encode_error("ERR Wrong number of arguements for HKEYS command")
     
-    return encode_array(store.hkeys(argv[0]))
+    return encode_array([encode_bulk_string(element) for element in store.hkeys(argv[0])])
 
 async def hvals(argv: list[bytes]) -> bytes:
     if len(argv) != 1:
         return encode_error("ERR Wrong number of arguements for HVALS command")
     
-    return encode_array(store.hvals(argv[0]))
+    return encode_array([encode_bulk_string(element) for element in store.hvals(argv[0])])
 
 async def hlen(argv: list[bytes]) -> bytes:
     if len(argv) != 1:
@@ -262,35 +258,42 @@ async def hlen(argv: list[bytes]) -> bytes:
     return encode_integer(store.hlen(argv[0]))
 
 
-COMMANDS = {
-    b"PING": [ping, True],
-    b"ECHO": [echo, True],
-    b"GET": [get, str],
-    b"SET": [set, str],
-    b"DEL": [delete, True],
-    b"EXISTS": [exists, True],
-    b"INCRBY": [incrby, str],
-    b"DECRBY": [decrby, str],
-    b"INCR": [incr, str],
-    b"DECR": [decr, str],
-    b"APPEND": [append, str],
-    b"STRLEN": [strlen, str],
-    b"EXPIRE": [expire, True],
-    b"TTL": [ttl, True],
-    b"PERSIST": [persist, True],
-    b"LPUSH": [lpush, deque],
-    b"RPUSH": [rpush, deque],
-    b"LPOP": [lpop, deque],
-    b"RPOP": [rpop, deque],
-    b"LRANGE": [lrange, deque],
-    b"LLEN": [llen, deque],
-    b"HGET": [hget, dict],
-    b"HSET": [hset, dict],
-    b"HDEL": [hdel, dict],
-    b"HGETALL": [hgetall, dict],
-    b"HKEYS": [hkeys, dict],
-    b"HVALS": [hvals, dict],
-    b"HLEN": [hlen, dict],
+class Command(NamedTuple):
+    handler: Callable[[list[bytes]], Awaitable[bytes]]
+    # The value type a key must already hold for this command to run. None means
+    # the command is type-agnostic (DEL, EXISTS, TTL, ...) or takes no key.
+    value_type: type | None = None
+
+
+COMMANDS: dict[bytes, Command] = {
+    b"PING": Command(ping),
+    b"ECHO": Command(echo),
+    b"GET": Command(get, bytes),
+    b"SET": Command(set, bytes),
+    b"DEL": Command(delete),
+    b"EXISTS": Command(exists),
+    b"INCRBY": Command(incrby, bytes),
+    b"DECRBY": Command(decrby, bytes),
+    b"INCR": Command(incr, bytes),
+    b"DECR": Command(decr, bytes),
+    b"APPEND": Command(append, bytes),
+    b"STRLEN": Command(strlen, bytes),
+    b"EXPIRE": Command(expire),
+    b"TTL": Command(ttl),
+    b"PERSIST": Command(persist),
+    b"LPUSH": Command(lpush, deque),
+    b"RPUSH": Command(rpush, deque),
+    b"LPOP": Command(lpop, deque),
+    b"RPOP": Command(rpop, deque),
+    b"LRANGE": Command(lrange, deque),
+    b"LLEN": Command(llen, deque),
+    b"HGET": Command(hget, dict),
+    b"HSET": Command(hset, dict),
+    b"HDEL": Command(hdel, dict),
+    b"HGETALL": Command(hgetall, dict),
+    b"HKEYS": Command(hkeys, dict),
+    b"HVALS": Command(hvals, dict),
+    b"HLEN": Command(hlen, dict),
 }
 
 async def dispatch(command_args: list[bytes]) -> bytes:
@@ -298,12 +301,14 @@ async def dispatch(command_args: list[bytes]) -> bytes:
         return encode_error("ERR empty command")
     
     command_name = command_args[0].upper()
-    command_handler = COMMANDS.get(command_name)
+    command = COMMANDS.get(command_name)
 
-    if not command_handler:
+    if command is None:
         return encode_error(f"ERR Invalid command '{command_name.decode()}'")
-    
-    if command_handler[1] is not True and not store.is_valid_value_type(command_args[1], command_handler[1]):
+
+    if (command.value_type is not None and
+        len(command_args) >= 2 and
+        not store.is_valid_value_type(command_args[1], command.value_type)):
         return encode_error("WRONGTYPE Operation against a key holding the wrong kind of value")
-    
-    return await command_handler[0](command_args[1:])
+
+    return await command.handler(command_args[1:])

@@ -83,3 +83,43 @@ def test_pipelined_commands(client):
     pipe.incr("a")
     pipe.get("a")
     assert pipe.execute() == [True, 2, b"2"]
+
+
+def test_list_push_range_pop(client):
+    assert client.rpush("l", "a", "b", "c") == 3
+    assert client.lrange("l", 0, -1) == [b"a", b"b", b"c"]
+    assert client.lpush("l", "z") == 4
+    assert client.lrange("l", 0, 0) == [b"z"]
+    assert client.lpop("l") == b"z"
+    assert client.rpop("l") == b"c"
+    assert client.llen("l") == 2
+
+
+def test_lpop_with_count(client):
+    client.rpush("l", "a", "b", "c")
+    assert client.lpop("l", 2) == [b"a", b"b"]
+
+
+def test_lpop_on_missing_key_returns_none(client):
+    assert client.lpop("missing") is None
+
+
+def test_hash_roundtrip(client):
+    assert client.hset("h", mapping={"a": "1", "b": "2"}) == 2
+    assert client.hget("h", "a") == b"1"
+    assert client.hgetall("h") == {b"a": b"1", b"b": b"2"}
+    assert client.hlen("h") == 2
+    assert sorted(client.hkeys("h")) == [b"a", b"b"]
+    assert sorted(client.hvals("h")) == [b"1", b"2"]
+    assert client.hdel("h", "a") == 1
+    assert client.hget("h", "a") is None
+
+
+def test_wrongtype_error_both_directions(client):
+    client.set("s", "v")
+    with pytest.raises(redis.exceptions.ResponseError, match="WRONGTYPE"):
+        client.lpush("s", "x")
+
+    client.rpush("l", "a")
+    with pytest.raises(redis.exceptions.ResponseError, match="WRONGTYPE"):
+        client.get("l")

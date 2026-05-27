@@ -165,3 +165,137 @@ class TestExpiry:
         await commands.set([b"k", b"v", b"EX", b"100"])
         assert _int(await commands.persist([b"k"])) == 1
         assert _int(await commands.ttl([b"k"])) == -1
+
+
+class TestListCommands:
+    async def test_rpush_returns_length(self):
+        assert _int(await commands.rpush([b"l", b"a", b"b", b"c"])) == 3
+
+    async def test_lpush_returns_length(self):
+        assert _int(await commands.lpush([b"l", b"a", b"b"])) == 2
+
+    async def test_push_wrong_arity_errors(self):
+        assert (await commands.rpush([b"l"])).startswith(b"-ERR")
+        assert (await commands.lpush([b"l"])).startswith(b"-ERR")
+
+    async def test_lrange_returns_array_of_bulk_strings(self):
+        await commands.rpush([b"l", b"a", b"b", b"c"])
+        assert await commands.lrange([b"l", b"0", b"-1"]) == \
+            b"*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"
+
+    async def test_lrange_of_missing_key_is_empty_array(self):
+        assert await commands.lrange([b"missing", b"0", b"-1"]) == b"*0\r\n"
+
+    async def test_lrange_non_integer_index_errors(self):
+        assert (await commands.lrange([b"l", b"x", b"1"])).startswith(b"-ERR")
+
+    async def test_lrange_wrong_arity_errors(self):
+        assert (await commands.lrange([b"l", b"0"])).startswith(b"-ERR")
+
+    async def test_lpop_without_count_returns_bulk_string(self):
+        await commands.rpush([b"l", b"a", b"b"])
+        assert await commands.lpop([b"l"]) == b"$1\r\na\r\n"
+
+    async def test_rpop_without_count_returns_bulk_string(self):
+        await commands.rpush([b"l", b"a", b"b"])
+        assert await commands.rpop([b"l"]) == b"$1\r\nb\r\n"
+
+    async def test_lpop_with_count_returns_array(self):
+        await commands.rpush([b"l", b"a", b"b", b"c"])
+        assert await commands.lpop([b"l", b"2"]) == b"*2\r\n$1\r\na\r\n$1\r\nb\r\n"
+
+    async def test_lpop_missing_key_without_count_is_nil(self):
+        assert await commands.lpop([b"missing"]) == b"$-1\r\n"
+
+    async def test_lpop_missing_key_with_count_is_null_array(self):
+        assert await commands.lpop([b"missing", b"2"]) == b"*-1\r\n"
+
+    async def test_lpop_non_positive_count_errors(self):
+        await commands.rpush([b"l", b"a"])
+        assert (await commands.lpop([b"l", b"0"])).startswith(b"-ERR")
+
+    async def test_lpop_non_integer_count_errors(self):
+        await commands.rpush([b"l", b"a"])
+        assert (await commands.lpop([b"l", b"x"])).startswith(b"-ERR")
+
+    async def test_lpop_too_many_args_errors(self):
+        assert (await commands.lpop([b"l", b"1", b"extra"])).startswith(b"-ERR")
+
+    async def test_llen(self):
+        await commands.rpush([b"l", b"a", b"b"])
+        assert _int(await commands.llen([b"l"])) == 2
+
+
+class TestHashCommands:
+    async def test_hset_returns_new_field_count(self):
+        assert _int(await commands.hset([b"h", b"a", b"1", b"b", b"2"])) == 2
+
+    async def test_hset_even_arg_count_errors(self):
+        assert (await commands.hset([b"h", b"a"])).startswith(b"-ERR")  # missing value
+
+    async def test_hset_too_few_args_errors(self):
+        assert (await commands.hset([b"h"])).startswith(b"-ERR")
+
+    async def test_hget(self):
+        await commands.hset([b"h", b"f", b"v"])
+        assert await commands.hget([b"h", b"f"]) == b"$1\r\nv\r\n"
+
+    async def test_hget_missing_field_is_nil(self):
+        await commands.hset([b"h", b"f", b"v"])
+        assert await commands.hget([b"h", b"nope"]) == b"$-1\r\n"
+
+    async def test_hget_wrong_arity_errors(self):
+        assert (await commands.hget([b"h"])).startswith(b"-ERR")
+
+    async def test_hdel_returns_count(self):
+        await commands.hset([b"h", b"a", b"1", b"b", b"2"])
+        assert _int(await commands.hdel([b"h", b"a", b"missing"])) == 1
+
+    async def test_hdel_wrong_arity_errors(self):
+        assert (await commands.hdel([b"h"])).startswith(b"-ERR")
+
+    async def test_hgetall_returns_flat_array(self):
+        await commands.hset([b"h", b"a", b"1", b"b", b"2"])
+        assert await commands.hgetall([b"h"]) == \
+            b"*4\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n"
+
+    async def test_hgetall_of_missing_key_is_empty_array(self):
+        assert await commands.hgetall([b"missing"]) == b"*0\r\n"
+
+    async def test_hkeys_and_hvals(self):
+        await commands.hset([b"h", b"a", b"1", b"b", b"2"])
+        assert await commands.hkeys([b"h"]) == b"*2\r\n$1\r\na\r\n$1\r\nb\r\n"
+        assert await commands.hvals([b"h"]) == b"*2\r\n$1\r\n1\r\n$1\r\n2\r\n"
+
+    async def test_hlen(self):
+        await commands.hset([b"h", b"a", b"1", b"b", b"2"])
+        assert _int(await commands.hlen([b"h"])) == 2
+
+
+class TestWrongType:
+    async def test_string_command_on_a_list_key(self):
+        await commands.dispatch([b"RPUSH", b"l", b"a"])
+        assert (await commands.dispatch([b"GET", b"l"])).startswith(b"-WRONGTYPE")
+
+    async def test_list_command_on_a_string_key(self):
+        await commands.dispatch([b"SET", b"s", b"v"])
+        assert (await commands.dispatch([b"LPUSH", b"s", b"a"])).startswith(b"-WRONGTYPE")
+
+    async def test_hash_command_on_a_string_key(self):
+        await commands.dispatch([b"SET", b"s", b"v"])
+        assert (await commands.dispatch([b"HSET", b"s", b"f", b"v"])).startswith(b"-WRONGTYPE")
+
+    async def test_list_command_on_a_hash_key(self):
+        await commands.dispatch([b"HSET", b"h", b"f", b"v"])
+        assert (await commands.dispatch([b"LPUSH", b"h", b"a"])).startswith(b"-WRONGTYPE")
+
+    async def test_type_agnostic_commands_work_across_types(self):
+        await commands.dispatch([b"RPUSH", b"l", b"a"])
+        assert await commands.dispatch([b"DEL", b"l"]) == b":1\r\n"
+        await commands.dispatch([b"HSET", b"h", b"f", b"v"])
+        assert await commands.dispatch([b"EXISTS", b"h"]) == b":1\r\n"
+
+    async def test_missing_key_passes_the_type_check(self):
+        # A command against a missing key should run, not raise WRONGTYPE.
+        assert await commands.dispatch([b"GET", b"missing"]) == b"$-1\r\n"
+        assert _int(await commands.dispatch([b"LPUSH", b"newlist", b"a"])) == 1

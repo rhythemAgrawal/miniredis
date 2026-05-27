@@ -5,6 +5,8 @@ used by the command handlers, exercised in test_commands.py). Expiry is tested
 deterministically by setting a TTL in the past via ``expire(key, -1)`` rather
 than sleeping, so the suite stays fast and non-flaky.
 """
+from collections import deque
+
 import pytest
 
 from miniredis.store import Store
@@ -159,3 +161,141 @@ class TestActiveExpiry:
         store.set(b"k", b"v", ttl=100)
         store.sample_and_expire()
         assert store.get(b"k") == b"v"
+
+
+class TestLists:
+    def test_rpush_appends_in_order(self, store):
+        assert store.rpush(b"l", [b"a", b"b", b"c"]) == 3
+        assert store.lrange(b"l", 0, -1) == [b"a", b"b", b"c"]
+
+    def test_lpush_prepends_so_batch_is_reversed(self, store):
+        # Each element is pushed to the head in turn, so the batch ends reversed.
+        assert store.lpush(b"l", [b"a", b"b", b"c"]) == 3
+        assert store.lrange(b"l", 0, -1) == [b"c", b"b", b"a"]
+
+    def test_push_returns_new_length(self, store):
+        store.rpush(b"l", [b"a"])
+        assert store.rpush(b"l", [b"b", b"c"]) == 3
+
+    def test_lpop_default_count_returns_head(self, store):
+        store.rpush(b"l", [b"a", b"b", b"c"])
+        assert store.lpop(b"l") == [b"a"]
+
+    def test_rpop_default_count_returns_tail(self, store):
+        store.rpush(b"l", [b"a", b"b", b"c"])
+        assert store.rpop(b"l") == [b"c"]
+
+    def test_lpop_with_count(self, store):
+        store.rpush(b"l", [b"a", b"b", b"c", b"d"])
+        assert store.lpop(b"l", count=2) == [b"a", b"b"]
+
+    def test_pop_count_exceeding_length_is_clamped(self, store):
+        store.rpush(b"l", [b"a", b"b"])
+        assert store.lpop(b"l", count=10) == [b"a", b"b"]
+
+    def test_pop_on_missing_key_returns_none(self, store):
+        assert store.lpop(b"missing") is None
+        assert store.rpop(b"missing") is None
+
+    def test_list_key_is_deleted_when_emptied(self, store):
+        store.rpush(b"l", [b"a"])
+        store.lpop(b"l")
+        assert store.exists(b"l") == 0
+
+    def test_llen(self, store):
+        store.rpush(b"l", [b"a", b"b", b"c"])
+        assert store.llen(b"l") == 3
+
+    def test_llen_of_missing_key_is_zero(self, store):
+        assert store.llen(b"missing") == 0
+
+    def test_lrange_negative_indices(self, store):
+        store.rpush(b"l", [b"a", b"b", b"c", b"d"])
+        assert store.lrange(b"l", 0, -1) == [b"a", b"b", b"c", b"d"]
+        assert store.lrange(b"l", -2, -1) == [b"c", b"d"]
+        assert store.lrange(b"l", 0, -2) == [b"a", b"b", b"c"]
+
+    def test_lrange_subrange(self, store):
+        store.rpush(b"l", [b"a", b"b", b"c", b"d"])
+        assert store.lrange(b"l", 1, 2) == [b"b", b"c"]
+
+    def test_lrange_of_missing_key_is_empty(self, store):
+        assert store.lrange(b"missing", 0, -1) == []
+
+
+class TestHashes:
+    def test_hset_and_hget(self, store):
+        store.hset(b"h", [b"f", b"v"])
+        assert store.hget(b"h", b"f") == b"v"
+
+    def test_hset_returns_count_of_new_fields(self, store):
+        assert store.hset(b"h", [b"a", b"1", b"b", b"2"]) == 2
+
+    def test_hset_update_is_not_counted(self, store):
+        store.hset(b"h", [b"a", b"1"])
+        assert store.hset(b"h", [b"a", b"2", b"b", b"3"]) == 1  # only b is new
+        assert store.hget(b"h", b"a") == b"2"
+
+    def test_hget_missing_field_returns_none(self, store):
+        store.hset(b"h", [b"a", b"1"])
+        assert store.hget(b"h", b"missing") is None
+
+    def test_hget_missing_key_returns_none(self, store):
+        assert store.hget(b"missing", b"f") is None
+
+    def test_hdel_returns_count_removed(self, store):
+        store.hset(b"h", [b"a", b"1", b"b", b"2", b"c", b"3"])
+        assert store.hdel(b"h", [b"a", b"b", b"missing"]) == 2
+
+    def test_hash_key_is_deleted_when_emptied(self, store):
+        store.hset(b"h", [b"a", b"1"])
+        store.hdel(b"h", [b"a"])
+        assert store.exists(b"h") == 0
+
+    def test_hlen(self, store):
+        store.hset(b"h", [b"a", b"1", b"b", b"2"])
+        assert store.hlen(b"h") == 2
+
+    def test_hlen_of_missing_key_is_zero(self, store):
+        assert store.hlen(b"missing") == 0
+
+    def test_hkeys_and_hvals_preserve_insertion_order(self, store):
+        store.hset(b"h", [b"a", b"1", b"b", b"2"])
+        assert store.hkeys(b"h") == [b"a", b"b"]
+        assert store.hvals(b"h") == [b"1", b"2"]
+
+    def test_hgetall_returns_flat_field_value_pairs(self, store):
+        store.hset(b"h", [b"a", b"1", b"b", b"2"])
+        assert store.hgetall(b"h") == [b"a", b"1", b"b", b"2"]
+
+    def test_hgetall_of_missing_key_is_empty(self, store):
+        assert store.hgetall(b"missing") == []
+
+
+class TestTypeValidation:
+    def test_missing_key_is_valid_for_any_type(self, store):
+        assert store.is_valid_value_type(b"missing", bytes) is True
+        assert store.is_valid_value_type(b"missing", deque) is True
+        assert store.is_valid_value_type(b"missing", dict) is True
+
+    def test_string_key_matches_bytes_only(self, store):
+        store.set(b"s", b"v")
+        assert store.is_valid_value_type(b"s", bytes) is True
+        assert store.is_valid_value_type(b"s", deque) is False
+        assert store.is_valid_value_type(b"s", dict) is False
+
+    def test_list_key_matches_deque_only(self, store):
+        store.rpush(b"l", [b"a"])
+        assert store.is_valid_value_type(b"l", deque) is True
+        assert store.is_valid_value_type(b"l", bytes) is False
+
+    def test_hash_key_matches_dict_only(self, store):
+        store.hset(b"h", [b"f", b"v"])
+        assert store.is_valid_value_type(b"h", dict) is True
+        assert store.is_valid_value_type(b"h", bytes) is False
+
+    def test_empty_string_value_is_still_typed_as_bytes(self, store):
+        # Regression: an empty-string value must NOT be treated as "any type".
+        store.set(b"s", b"")
+        assert store.is_valid_value_type(b"s", bytes) is True
+        assert store.is_valid_value_type(b"s", deque) is False

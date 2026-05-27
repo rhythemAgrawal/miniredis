@@ -25,7 +25,10 @@ def encode_bulk_string(s: bytes | None) -> bytes:
     suffix = "\r\n"
     return prefix.encode() + s + suffix.encode()
 
-def encode_array(items: list[bytes]) -> bytes:
+def encode_array(items: list[bytes] | None) -> bytes:
+    if items is None:
+        return "*-1\r\n".encode()
+
     prefix = "*" + str(len(items)) + "\r\n"
     return prefix.encode() + b"".join(items)
 

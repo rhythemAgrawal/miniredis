@@ -17,12 +17,10 @@ class Store:
             self.exists(*sample)
     
     def is_valid_value_type(self, key: bytes, allowed_type: type) -> bool:
-        value = self._data.get(key) if self.exists(key) else None
-
-        if not value:
+        if not self.exists(key):
             return True
         
-        return type(value) == allowed_type
+        return type(self._data.get(key)) is allowed_type
     
     def get(self, key: bytes) -> bytes | None:
         if self.exists(key):
@@ -124,7 +122,7 @@ class Store:
     def lpush(self, key: bytes, elements: list[bytes]) -> int:
         curr = self._list_get(key)
 
-        if not curr:
+        if curr is None:
             self._data[key] = deque()
             curr = self._data[key]
 
@@ -134,19 +132,19 @@ class Store:
     def rpush(self, key: bytes, elements: list[bytes]) -> int:
         curr = self._list_get(key)
 
-        if not curr:
+        if curr is None:
             self._data[key] = deque()
             curr = self._data[key]
 
         curr.extend(elements)
         return len(curr)
     
-    def lpop(self, key: bytes, count: int=1) -> list[bytes]:
+    def lpop(self, key: bytes, count: int=1) -> list[bytes] | None:
         curr = self._list_get(key)
         popped = []
 
-        if not curr:
-            return popped
+        if curr is None:
+            return None
         
         pop_count = min(count, len(curr))
 
@@ -158,12 +156,12 @@ class Store:
         
         return popped
     
-    def rpop(self, key: bytes, count: int=1) -> list[bytes]:
+    def rpop(self, key: bytes, count: int=1) -> list[bytes] | None:
         curr = self._list_get(key)
         popped = []
 
-        if not curr:
-            return popped
+        if curr is None:
+            return None
         
         pop_count = min(count, len(curr))
 
