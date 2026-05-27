@@ -184,16 +184,91 @@ class Store:
         curr = self._list_get(key) or deque()
         return len(curr)
     
+    def _get_hash(self, key) -> dict | None:
+        return self._data.get(key) if self.exists(key) else None
+    
     def hget(self, key: bytes, field: bytes) -> bytes | None:
-        if not self.exists(key):
-            return
-        
-        value = self._data.get(key)
+        hash = self._get_hash(key)
 
-        if field not in value:
+        if not hash or field not in hash:
             return
         
-        return value.get(field)
+        return hash.get(field)
+    
+    def hset(self, key: bytes, field_value_pairs: list[bytes]) -> int:
+        hash = self._get_hash(key)
+
+        if hash is None:
+            hash = {}
+            self._data[key] = hash
+
+        count = 0
+        
+        for i in range(0, len(field_value_pairs), 2):
+            field = field_value_pairs[i]
+            value = field_value_pairs[i+1]
+
+            if field not in hash:
+                count += 1
+            
+            hash[field] = value
+        
+        return count
+    
+    def hdel(self, key: bytes, fields: list[bytes]) -> int:
+        hash = self._get_hash(key)
+
+        if not hash:
+            return 0
+
+        count = 0
+
+        for field in fields:
+            if field in hash:
+                del hash[field]
+                count += 1
+        
+        if not len(hash):
+            self.delete(key)
+
+        return count
+    
+    def hgetall(self, key: bytes) -> list[bytes]:
+        hash = self._get_hash(key)
+
+        if not hash:
+            return []
+        
+        all_data = []
+
+        for field, value in hash.items():
+            all_data.extend([field, value])
+        
+        return all_data
+    
+    def hkeys(self, key: bytes) -> list[bytes]:
+        hash = self._get_hash(key)
+
+        if not hash:
+            return []
+        
+        return list(hash.keys())
+    
+    def hvals(self, key: bytes) -> list[bytes]:
+        hash = self._get_hash(key)
+
+        if not hash:
+            return []
+        
+        return list(hash.values())
+    
+    def hlen(self, key: bytes) -> int:
+        hash = self._get_hash(key)
+
+        if not hash:
+            return 0
+        
+        return len(hash)
 
 
 async def expiration_sweeper(store: Store) -> None:

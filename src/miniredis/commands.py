@@ -219,6 +219,48 @@ async def llen(argv: list[bytes]) -> bytes:
     
     return encode_integer(store.llen(argv[0]))
 
+async def hget(argv: list[bytes]) -> bytes:
+    if len(argv) != 2:
+        return encode_error("ERR Wrong number of arguements for HGET command")
+    
+    return encode_bulk_string(store.hget(argv[0], argv[1]))
+
+async def hset(argv: list[bytes]) -> bytes:
+    if len(argv) < 3 or len(argv) % 2 == 1:
+        return encode_error("ERR Wrong number of arguements for HSET command")
+    
+    return encode_integer(store.hset(argv[0], argv[1:]))
+
+async def hdel(argv: list[bytes]) -> bytes:
+    if len(argv) < 2:
+        return encode_error("ERR Wrong number of arguements for HDEL command")
+    
+    return encode_integer(store.hdel(argv[0], argv[1:]))
+
+async def hgetall(argv: list[bytes]) -> bytes:
+    if len(argv) != 1:
+        return encode_error("ERR Wrong number of arguements for HGETALL command")
+    
+    return encode_array(store.hgetall(argv[0]))
+
+async def hkeys(argv: list[bytes]) -> bytes:
+    if len(argv) != 1:
+        return encode_error("ERR Wrong number of arguements for HKEYS command")
+    
+    return encode_array(store.hkeys(argv[0]))
+
+async def hvals(argv: list[bytes]) -> bytes:
+    if len(argv) != 1:
+        return encode_error("ERR Wrong number of arguements for HVALS command")
+    
+    return encode_array(store.hvals(argv[0]))
+
+async def hlen(argv: list[bytes]) -> bytes:
+    if len(argv) != 1:
+        return encode_error("ERR Wrong number of arguements for HLEN command")
+    
+    return encode_integer(store.hlen(argv[0]))
+
 
 COMMANDS = {
     b"PING": [ping, True],
@@ -241,7 +283,14 @@ COMMANDS = {
     b"LPOP": [lpop, deque],
     b"RPOP": [rpop, deque],
     b"LRANGE": [lrange, deque],
-    b"LLEN": [llen, deque]
+    b"LLEN": [llen, deque],
+    b"HGET": [hget, dict],
+    b"HSET": [hset, dict],
+    b"HDEL": [hdel, dict],
+    b"HGETALL": [hgetall, dict],
+    b"HKEYS": [hkeys, dict],
+    b"HVALS": [hvals, dict],
+    b"HLEN": [hlen, dict],
 }
 
 async def dispatch(command_args: list[bytes]) -> bytes:
