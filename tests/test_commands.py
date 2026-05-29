@@ -299,3 +299,89 @@ class TestWrongType:
         # A command against a missing key should run, not raise WRONGTYPE.
         assert await commands.dispatch([b"GET", b"missing"]) == b"$-1\r\n"
         assert _int(await commands.dispatch([b"LPUSH", b"newlist", b"a"])) == 1
+
+    async def test_sorted_set_command_on_a_string_key(self):
+        await commands.dispatch([b"SET", b"s", b"v"])
+        assert (await commands.dispatch([b"ZADD", b"s", b"1", b"a"])).startswith(b"-WRONGTYPE")
+
+    async def test_string_command_on_a_sorted_set_key(self):
+        await commands.dispatch([b"ZADD", b"z", b"1", b"a"])
+        assert (await commands.dispatch([b"GET", b"z"])).startswith(b"-WRONGTYPE")
+
+
+class TestSortedSetCommands:
+    async def test_zadd_returns_new_member_count(self):
+        assert _int(await commands.zadd([b"z", b"1", b"a", b"2", b"b"])) == 2
+
+    async def test_zadd_update_returns_zero(self):
+        await commands.zadd([b"z", b"1", b"a"])
+        assert _int(await commands.zadd([b"z", b"5", b"a"])) == 0
+
+    async def test_zadd_wrong_arity_errors(self):
+        assert (await commands.zadd([b"z", b"1"])).startswith(b"-ERR")  # missing member
+
+    async def test_zadd_non_numeric_score_errors(self):
+        assert (await commands.zadd([b"z", b"x", b"a"])).startswith(b"-ERR")
+
+    async def test_zscore(self):
+        await commands.zadd([b"z", b"2", b"a"])
+        assert await commands.zscore([b"z", b"a"]) == b"$3\r\n2.0\r\n"
+
+    async def test_zscore_missing_is_nil(self):
+        assert await commands.zscore([b"z", b"a"]) == b"$-1\r\n"
+
+    async def test_zscore_wrong_arity_errors(self):
+        assert (await commands.zscore([b"z"])).startswith(b"-ERR")
+
+    async def test_zrank(self):
+        await commands.zadd([b"z", b"1", b"a", b"2", b"b"])
+        assert _int(await commands.zrank([b"z", b"b"])) == 1
+
+    async def test_zrank_missing_is_nil(self):
+        await commands.zadd([b"z", b"1", b"a"])
+        assert await commands.zrank([b"z", b"x"]) == b"$-1\r\n"
+
+    async def test_zrange_returns_array_of_bulk_strings(self):
+        await commands.zadd([b"z", b"1", b"a", b"2", b"b", b"3", b"c"])
+        assert await commands.zrange([b"z", b"0", b"-1"]) == \
+            b"*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"
+
+    async def test_zrange_missing_key_is_empty_array(self):
+        assert await commands.zrange([b"missing", b"0", b"-1"]) == b"*0\r\n"
+
+    async def test_zrange_out_of_bounds_negative_start(self):
+        # Regression: ZRANGE z -100 -50 on a small set must return an empty
+        # array, not overrun the skip list.
+        await commands.zadd([b"z", b"1", b"a", b"2", b"b", b"3", b"c"])
+        assert await commands.zrange([b"z", b"-100", b"-50"]) == b"*0\r\n"
+
+    async def test_zrange_non_integer_index_errors(self):
+        assert (await commands.zrange([b"z", b"x", b"1"])).startswith(b"-ERR")
+
+    async def test_zrangebyscore_returns_array(self):
+        await commands.zadd([b"z", b"1", b"a", b"2", b"b", b"3", b"c"])
+        assert await commands.zrangebyscore([b"z", b"2", b"3"]) == \
+            b"*2\r\n$1\r\nb\r\n$1\r\nc\r\n"
+
+    async def test_zrangebyscore_non_numeric_errors(self):
+        assert (await commands.zrangebyscore([b"z", b"x", b"3"])).startswith(b"-ERR")
+
+    async def test_zrem(self):
+        await commands.zadd([b"z", b"1", b"a", b"2", b"b"])
+        assert _int(await commands.zrem([b"z", b"a", b"missing"])) == 1
+
+    async def test_zrem_wrong_arity_errors(self):
+        assert (await commands.zrem([b"z"])).startswith(b"-ERR")
+
+    async def test_zadd_and_zscore_with_infinity(self):
+        await commands.zadd([b"z", b"+inf", b"a", b"-inf", b"b", b"5", b"c"])
+        assert await commands.zscore([b"z", b"a"]) == b"$3\r\ninf\r\n"
+        assert await commands.zscore([b"z", b"b"]) == b"$4\r\n-inf\r\n"
+
+    async def test_zrangebyscore_with_infinite_bounds(self):
+        await commands.zadd([b"z", b"+inf", b"a", b"-inf", b"b", b"5", b"c"])
+        # -inf..+inf returns everything in score order (b=-inf, c=5, a=+inf)
+        assert await commands.zrangebyscore([b"z", b"-inf", b"+inf"]) == \
+            b"*3\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\na\r\n"
+        assert await commands.zrangebyscore([b"z", b"-inf", b"5"]) == \
+            b"*2\r\n$1\r\nb\r\n$1\r\nc\r\n"

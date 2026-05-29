@@ -7,7 +7,7 @@ on the internal ``_keys`` / ``_pos`` / ``_data`` invariants that make that work.
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from miniredis.custom_data_structures import RandomDict
+from miniredis.custom_data_structures import RandomDict, SortedSet
 
 
 def _assert_invariants(rd: RandomDict) -> None:
@@ -126,3 +126,43 @@ def test_invariants_hold_under_random_ops(ops):
         else:
             rd.delete(key)
         _assert_invariants(rd)
+
+
+class TestSortedSet:
+    """SortedSet coordinates a member->score dict with a SkipList.
+
+    The heavy skip-list correctness (ordering, ranks, ranges, edge cases, and
+    the property tests) lives in test_skiplist.py. These tests cover SortedSet's
+    own responsibility: keeping the two structures in sync and delegating
+    queries to the skip list.
+    """
+
+    def test_get_score(self):
+        ss = SortedSet()
+        ss.insert(3.5, b"a")
+        assert ss.get_score(b"a") == 3.5
+        assert ss.get_score(b"missing") is None
+
+    def test_insert_updates_both_structures(self):
+        ss = SortedSet()
+        ss.insert(1.0, b"a")
+        assert ss.get_score(b"a") == 1.0          # the member->score dict
+        assert ss.get_length() == 1               # the skip list
+        assert ss.get_range_by_rank(0, -1) == [b"a"]
+
+    def test_delete_removes_from_both_structures(self):
+        ss = SortedSet()
+        ss.insert(1.0, b"a")
+        ss.delete(1.0, b"a")
+        assert ss.get_score(b"a") is None
+        assert ss.get_length() == 0
+        assert ss.get_range_by_rank(0, -1) == []
+
+    def test_query_methods_delegate_to_skiplist(self):
+        ss = SortedSet()
+        for i, member in enumerate([b"a", b"b", b"c"]):
+            ss.insert(float(i), member)
+        assert ss.get_rank(1.0, b"b") == 1
+        assert ss.get_range_by_rank(0, -1) == [b"a", b"b", b"c"]
+        assert ss.get_range_by_score(0.0, 1.0) == [b"a", b"b"]
+        assert ss.get_length() == 3

@@ -1,6 +1,7 @@
 from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import NamedTuple
+import math
 
 from miniredis.protocol import encode_error, encode_simple_string, encode_bulk_string, encode_integer, encode_array
 from miniredis.store import store
@@ -268,6 +269,9 @@ async def zadd(argv: list[bytes]) -> bytes:
     try:
         for i in range(0, len(data), 2):
             data[i] = float(data[i])
+
+            if math.isnan(data[i]):
+                raise ValueError
     except ValueError:
         return encode_error("ERR invalid arguments for ZADD command")
     
@@ -307,7 +311,7 @@ async def zrange(argv: list[bytes]) -> bytes:
     except ValueError:
         return encode_error("ERR Invalid arguments for ZRANGE command")
 
-    return encode_array(store.zrange(key, start, end))
+    return encode_array([encode_bulk_string(element) for element in store.zrange(key, start, end)])
 
 async def zrangebyscore(argv: list[bytes]) -> bytes:
     if len(argv) != 3:
@@ -321,7 +325,7 @@ async def zrangebyscore(argv: list[bytes]) -> bytes:
     except ValueError:
         return encode_error("ERR Invalid arguments for ZRANGEBYSCORE command")
 
-    return encode_array(store.zrange_by_score(key, start, end))
+    return encode_array([encode_bulk_string(element) for element in store.zrange_by_score(key, start, end)])
 
 async def zrem(argv: list[bytes]) -> bytes:
     if len(argv) < 2:

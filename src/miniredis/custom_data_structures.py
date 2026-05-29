@@ -1,5 +1,6 @@
 import random
-from typing import NamedTuple
+from dataclasses import dataclass
+
 
 class RandomDict:
     def __init__(self):
@@ -40,34 +41,37 @@ class RandomDict:
         return sample
     
 class SkipListNode:
-    def __init__(self, member: bytes | str):
+    def __init__(self, member: bytes | None, score: float):
         self.member = member
+        self.score = score
         self.next: list[Next] = []
     
-class Next(NamedTuple):
+@dataclass
+class Next:
     node: SkipListNode
     span: int
 
-class SortedSet:
+class SkipList:
+    """
+    To-do:
+
+    1) Track ranks at each layer instead of skip-counts as this might simplify several things.
+    """
     MAX_LEVEL = 32
     PROBABILITY = 0.25
 
     def __init__(self):
-        self.score_table: dict[bytes | str, float] = {
-            "head": float('-inf'),
-            "tail": float('inf')
-        }
-        self.head = SkipListNode("head")
-        self.tail = SkipListNode("tail")
+        self.head = SkipListNode(None, float('-inf'))
+        self.tail = SkipListNode(None, float('inf'))
+        self.length = 0
 
         for _ in range(self.MAX_LEVEL):
-            self.head.next.append(Next(self.tail, 1))
+            self.head.next.append(Next(self.tail, 0))
     
     def _is_lte(self, target: tuple[float, bytes], node: SkipListNode) -> bool:
-        return target <= (self.score_table.get(node.member), node.member)
-    
-    def get_score(self, member: bytes) -> float | None:
-        return self.score_table.get(member)
+        if node is self.tail:
+            return True
+        return target <= (node.score, node.member)
     
     def search_by_score(self, target_score: float, member: bytes):
         curr = self.head
@@ -93,7 +97,6 @@ class SortedSet:
         return random.random() < self.PROBABILITY
     
     def insert(self, score: float, member: bytes) -> None:
-        self.score_table[member] = score
         prev_nodes, skip_counts = self.search_by_score(score, member)
         prev_nodes.reverse()
         skip_counts.reverse()
@@ -102,7 +105,7 @@ class SortedSet:
         while self._heads() and level_count < self.MAX_LEVEL:
             level_count += 1
 
-        new = SkipListNode(member)
+        new = SkipListNode(member, score)
         curr_count = 0
 
         for level in range(level_count):
@@ -111,31 +114,39 @@ class SortedSet:
 
             if level > 0:
                 curr_count += skip_counts[level-1]
-                new_span = old_span - curr_count
             else:
                 curr_count = 1
-                new_span = 1
-
+            
+            new_span = old_span - curr_count + 1
             prev_nodes[level].next[level].node = new
             prev_nodes[level].next[level].span = curr_count
             new.next.append(Next(next_node, new_span))
+        
+        for level in range(level_count, self.MAX_LEVEL):
+            prev_nodes[level].next[level].span += 1
+        
+        self.length += 1
     
     def delete(self, score: float, member: bytes) -> None:
-        del self.score_table[member]
         prev_nodes, skip_counts = self.search_by_score(score, member)
         prev_nodes.reverse()
         to_delete = prev_nodes[0].next[0].node
 
         for level in range(len(to_delete.next)):
             prev_nodes[level].next[level].node = to_delete.next[level].node
-            prev_nodes[level].next[level].span += to_delete.next[level].span
+            prev_nodes[level].next[level].span += to_delete.next[level].span - 1
+        
+        for level in range(len(to_delete.next), self.MAX_LEVEL):
+            prev_nodes[level].next[level].span -= 1
+        
+        self.length -= 1
     
     def get_range_by_score(self, start: float, end: float) -> list[bytes]:
         prev_nodes, skip_counts = self.search_by_score(start, b"")
         curr = prev_nodes[-1].next[0].node
         member_range = []
 
-        while self.score_table[curr.member] <= end:
+        while curr is not self.tail and curr.score <= end:
             member_range.append(curr.member)
             curr = curr.next[0].node
         
@@ -146,20 +157,28 @@ class SortedSet:
         return sum(skip_counts)
     
     def get_length(self) -> int:
-        count = 0
+        return self.length
+    
+    def _node_at_rank(self, rank: int) -> SkipListNode:
         curr = self.head
-
-        while curr != self.tail:
-            count += curr.next[self.MAX_LEVEL-1].span
-            curr = curr.next[self.MAX_LEVEL-1].node
+        level = self.MAX_LEVEL - 1
+        count = -1
         
-        return count
+        while count < rank:
+            nxt = curr.next[level]
+            if nxt.node is not self.tail and count + nxt.span <= rank:
+                count += nxt.span
+                curr = nxt.node
+            else:
+                level -= 1
+        
+        return curr
     
     def get_range_by_rank(self, start: int, end: int) -> list[bytes]:
         length = self.get_length()
 
         if start < 0:
-            start = length + start
+            start = max(length + start, 0)
 
         if end < 0:
             end = length + end
@@ -169,18 +188,7 @@ class SortedSet:
         
         end = min(end, length-1)
 
-        curr = self.head
-        level = self.MAX_LEVEL - 1
-        target = start
-        count = 0
-        
-        while count < target:
-            if count + curr.next[level].span <= target:
-                count += curr.next[level].span
-                curr = curr.next[level].node
-            else:
-                level -= 1
-        
+        curr = self._node_at_rank(start)
         member_range = []
 
         for i in range(start, end+1):
@@ -188,3 +196,31 @@ class SortedSet:
             curr = curr.next[0].node
         
         return member_range
+    
+class SortedSet:
+    def __init__(self):
+        self.score_table: dict[bytes, float] = {}
+        self.skipList: SkipList = SkipList()
+    
+    def get_score(self, member: bytes) -> float | None:
+        return self.score_table.get(member)
+    
+    def insert(self, score: float, member: bytes) -> None:
+        self.score_table[member] = score
+        self.skipList.insert(score, member)
+    
+    def delete(self, score: float, member: bytes) -> None:
+        del self.score_table[member]
+        self.skipList.delete(score, member)
+
+    def get_rank(self, score: float, member: bytes) -> int:
+        return self.skipList.get_rank(score, member)
+
+    def get_range_by_rank(self, start: int, end: int) -> list[bytes]:
+        return self.skipList.get_range_by_rank(start, end)
+
+    def get_range_by_score(self, start: float, end: float) -> list[bytes]:
+        return self.skipList.get_range_by_score(start, end)
+
+    def get_length(self) -> int:
+        return self.skipList.get_length()

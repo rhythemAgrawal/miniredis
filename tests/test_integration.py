@@ -123,3 +123,39 @@ def test_wrongtype_error_both_directions(client):
     client.rpush("l", "a")
     with pytest.raises(redis.exceptions.ResponseError, match="WRONGTYPE"):
         client.get("l")
+
+
+def test_sorted_set_commands(client):
+    assert client.zadd("z", {"a": 1, "b": 2, "c": 3}) == 3
+    assert client.zscore("z", "a") == 1.0
+    assert client.zrange("z", 0, -1) == [b"a", b"b", b"c"]
+    assert client.zrank("z", "b") == 1
+    assert client.zrangebyscore("z", 2, 3) == [b"b", b"c"]
+    assert client.zrem("z", "a") == 1
+    assert client.zrange("z", 0, -1) == [b"b", b"c"]
+
+
+def test_zadd_update_repositions(client):
+    client.zadd("z", {"a": 1, "b": 2})
+    client.zadd("z", {"a": 5})
+    assert client.zrange("z", 0, -1) == [b"b", b"a"]
+
+
+def test_zrank_missing_member_is_none(client):
+    client.zadd("z", {"a": 1})
+    assert client.zrank("z", "x") is None
+
+
+def test_sorted_set_wrongtype(client):
+    client.set("s", "v")
+    with pytest.raises(redis.exceptions.ResponseError, match="WRONGTYPE"):
+        client.zadd("s", {"a": 1})
+
+
+def test_sorted_set_infinity_scores(client):
+    client.zadd("z", {"a": float("inf"), "b": float("-inf"), "c": 5})
+    assert client.zscore("z", "a") == float("inf")
+    assert client.zscore("z", "b") == float("-inf")
+    assert client.zrange("z", 0, -1) == [b"b", b"c", b"a"]
+    assert client.zrangebyscore("z", float("-inf"), float("inf")) == [b"b", b"c", b"a"]
+    assert client.zrangebyscore("z", float("-inf"), 5) == [b"b", b"c"]

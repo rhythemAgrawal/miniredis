@@ -299,3 +299,63 @@ class TestTypeValidation:
         store.set(b"s", b"")
         assert store.is_valid_value_type(b"s", bytes) is True
         assert store.is_valid_value_type(b"s", deque) is False
+
+
+class TestSortedSets:
+    def test_zadd_and_zscore(self, store):
+        assert store.zadd(b"z", [1.0, b"a", 2.0, b"b"]) == 2
+        assert store.zscore(b"z", b"a") == 1.0
+
+    def test_zadd_update_returns_zero_and_repositions(self, store):
+        store.zadd(b"z", [1.0, b"a", 2.0, b"b"])
+        assert store.zadd(b"z", [5.0, b"a"]) == 0          # a already exists
+        assert store.zscore(b"z", b"a") == 5.0
+        assert store.zrange(b"z", 0, -1) == [b"b", b"a"]   # b(2) now before a(5)
+
+    def test_zscore_missing(self, store):
+        assert store.zscore(b"missing", b"a") is None
+        store.zadd(b"z", [1.0, b"a"])
+        assert store.zscore(b"z", b"x") is None
+
+    def test_zrank(self, store):
+        store.zadd(b"z", [1.0, b"a", 2.0, b"b", 3.0, b"c"])
+        assert store.zrank(b"z", b"a") == 0
+        assert store.zrank(b"z", b"c") == 2
+
+    def test_zrank_missing_returns_none(self, store):
+        store.zadd(b"z", [1.0, b"a"])
+        assert store.zrank(b"z", b"x") is None
+        assert store.zrank(b"missing", b"a") is None
+
+    def test_zrange_by_rank(self, store):
+        store.zadd(b"z", [1.0, b"a", 2.0, b"b", 3.0, b"c"])
+        assert store.zrange(b"z", 0, -1) == [b"a", b"b", b"c"]
+        assert store.zrange(b"z", 0, 1) == [b"a", b"b"]
+        assert store.zrange(b"z", -2, -1) == [b"b", b"c"]
+
+    def test_zrange_missing_key_is_empty(self, store):
+        assert store.zrange(b"missing", 0, -1) == []
+
+    def test_zrange_by_score(self, store):
+        store.zadd(b"z", [1.0, b"a", 2.0, b"b", 3.0, b"c", 4.0, b"d"])
+        assert store.zrange_by_score(b"z", 2.0, 3.0) == [b"b", b"c"]
+
+    def test_zrem(self, store):
+        store.zadd(b"z", [1.0, b"a", 2.0, b"b", 3.0, b"c"])
+        assert store.zrem(b"z", [b"a", b"missing"]) == 1
+        assert store.zrange(b"z", 0, -1) == [b"b", b"c"]
+
+    def test_zrem_missing_key(self, store):
+        assert store.zrem(b"missing", [b"a"]) == 0
+
+    def test_tie_break_is_lexicographic(self, store):
+        store.zadd(b"z", [1.0, b"banana", 1.0, b"apple", 1.0, b"cherry"])
+        assert store.zrange(b"z", 0, -1) == [b"apple", b"banana", b"cherry"]
+
+    def test_infinity_scores(self, store):
+        store.zadd(b"z", [float("-inf"), b"lo", 5.0, b"mid", float("inf"), b"hi"])
+        assert store.zscore(b"z", b"hi") == float("inf")
+        assert store.zscore(b"z", b"lo") == float("-inf")
+        assert store.zrange(b"z", 0, -1) == [b"lo", b"mid", b"hi"]
+        assert store.zrange_by_score(b"z", float("-inf"), float("inf")) == [b"lo", b"mid", b"hi"]
+        assert store.zrange_by_score(b"z", float("-inf"), 5.0) == [b"lo", b"mid"]
