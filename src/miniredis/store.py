@@ -3,11 +3,11 @@ import math
 import asyncio
 from collections import deque
 
-from miniredis.custom_data_structures import RandomDict
+from miniredis.custom_data_structures import RandomDict, SortedSet
 
 class Store:
     def __init__(self):
-        self._data: dict[bytes, bytes | deque[bytes] | dict[bytes, bytes]] = {}
+        self._data: dict[bytes, bytes | deque[bytes] | dict[bytes, bytes] | SortedSet] = {}
         self._ttl = RandomDict()
     
     def sample_and_expire(self) -> None:
@@ -267,6 +267,81 @@ class Store:
             return 0
         
         return len(hash)
+    
+    def _get_sorted_set(self, key: bytes) -> SortedSet | None:
+        return self._data.get(key) if self.exists(key) else None
+    
+    def zadd(self, key: bytes, data: list) -> int:
+        sorted_set = self._get_sorted_set(key)
+
+        if sorted_set is None:
+            sorted_set = SortedSet()
+            self._data[key] = sorted_set
+        
+        count = 0
+
+        for i in range(0, len(data), 2):
+            score, member = data[i], data[i+1]
+            existing_score = sorted_set.get_score(member)
+
+            if existing_score is not None:
+                sorted_set.delete(existing_score, member)
+            else:
+                count += 1
+            
+            sorted_set.insert(score, member)
+        
+        return count
+    
+    def zscore(self, key: bytes, member: bytes) -> float | None:
+        sorted_set = self._get_sorted_set(key)
+
+        if sorted_set is None:
+            return None
+        
+        return sorted_set.get_score(member)
+    
+    def zrank(self, key: bytes, member: bytes) -> int | None:
+        score = self.zscore(key, member)
+
+        if score is None:
+            return None
+        
+        sorted_set = self._get_sorted_set(key)
+        return sorted_set.get_rank(score, member)
+    
+    def zrange(self, key: bytes, start: int, end: int) -> list[bytes]:
+        sorted_set = self._get_sorted_set(key)
+
+        if sorted_set is None:
+            return []
+        
+        return sorted_set.get_range_by_rank(start, end)
+    
+    def zrange_by_score(self, key: bytes, start: float, end: float) -> list[bytes]:
+        sorted_set = self._get_sorted_set(key)
+
+        if sorted_set is None:
+            return []
+        
+        return sorted_set.get_range_by_score(start, end)
+    
+    def zrem(self, key: bytes, members: list[bytes]) -> int:
+        sorted_set = self._get_sorted_set(key)
+
+        if sorted_set is None:
+            return 0
+        
+        count = 0
+        
+        for member in members:
+            score = sorted_set.get_score(member)
+
+            if score is not None:
+                sorted_set.delete(score, member)
+                count += 1
+        
+        return count
 
 
 async def expiration_sweeper(store: Store) -> None:

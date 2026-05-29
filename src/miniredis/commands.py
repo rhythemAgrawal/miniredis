@@ -4,6 +4,7 @@ from typing import NamedTuple
 
 from miniredis.protocol import encode_error, encode_simple_string, encode_bulk_string, encode_integer, encode_array
 from miniredis.store import store
+from miniredis.custom_data_structures import SortedSet
 
 
 async def ping(argv: list[bytes]) -> bytes:
@@ -257,6 +258,77 @@ async def hlen(argv: list[bytes]) -> bytes:
     
     return encode_integer(store.hlen(argv[0]))
 
+async def zadd(argv: list[bytes]) -> bytes:
+    if len(argv) < 3 or len(argv) % 2 == 0:
+        return encode_error("ERR Wrong number of arguements for ZADD command")
+    
+    key = argv[0]
+    data = argv[1:]
+
+    try:
+        for i in range(0, len(data), 2):
+            data[i] = float(data[i])
+    except ValueError:
+        return encode_error("ERR invalid arguments for ZADD command")
+    
+    return encode_integer(store.zadd(key, data))
+
+async def zscore(argv: list[bytes]) -> bytes:
+    if len(argv) != 2:
+        return encode_error("ERR Wrong number of arguements for ZSCORE command")
+    
+    score = store.zscore(argv[0], argv[1])
+
+    if score is not None:
+        score = str(score).encode()
+    
+    return encode_bulk_string(score)
+
+async def zrank(argv: list[bytes]) -> bytes:
+    if len(argv) != 2:
+        return encode_error("ERR Wrong number of arguements for ZRANK command")
+    
+    rank = store.zrank(argv[0], argv[1])
+
+    if rank is None:
+        return encode_bulk_string(None)
+    
+    return encode_integer(rank)
+
+async def zrange(argv: list[bytes]) -> bytes:
+    if len(argv) != 3:
+        return encode_error("ERR Wrong number of arguements for ZRANGE command")
+    
+    key, start, end = argv
+
+    try:
+        start = int(start.decode())
+        end = int(end.decode())
+    except ValueError:
+        return encode_error("ERR Invalid arguments for ZRANGE command")
+
+    return encode_array(store.zrange(key, start, end))
+
+async def zrangebyscore(argv: list[bytes]) -> bytes:
+    if len(argv) != 3:
+        return encode_error("ERR Wrong number of arguements for ZRANGEBYSCORE command")
+    
+    key, start, end = argv
+
+    try:
+        start = float(start.decode())
+        end = float(end.decode())
+    except ValueError:
+        return encode_error("ERR Invalid arguments for ZRANGEBYSCORE command")
+
+    return encode_array(store.zrange_by_score(key, start, end))
+
+async def zrem(argv: list[bytes]) -> bytes:
+    if len(argv) < 2:
+        return encode_error("ERR Wrong number of arguements for ZREM command")
+    
+    return encode_integer(store.zrem(argv[0], argv[1:]))
+
 
 class Command(NamedTuple):
     handler: Callable[[list[bytes]], Awaitable[bytes]]
@@ -294,6 +366,12 @@ COMMANDS: dict[bytes, Command] = {
     b"HKEYS": Command(hkeys, dict),
     b"HVALS": Command(hvals, dict),
     b"HLEN": Command(hlen, dict),
+    b"ZADD": Command(zadd, SortedSet),
+    b"ZSCORE": Command(zscore, SortedSet),
+    b"ZRANK": Command(zrank, SortedSet),
+    b"ZRANGE": Command(zrange, SortedSet),
+    b"ZRANGEBYSCORE": Command(zrangebyscore, SortedSet),
+    b"ZREM": Command(zrem, SortedSet),
 }
 
 async def dispatch(command_args: list[bytes]) -> bytes:
