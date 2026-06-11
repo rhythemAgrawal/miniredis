@@ -2,7 +2,7 @@ import asyncio
 
 from miniredis.protocol import read_command, ProtocolError, encode_error
 from miniredis.commands import dispatch
-from miniredis.store import store, expiration_sweeper
+from miniredis.store import store, expiration_sweeper, schedule_snapshot
 
 
 async def handle_request(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -24,6 +24,7 @@ async def handle_request(reader: asyncio.StreamReader, writer: asyncio.StreamWri
 async def main(host="127.0.0.1", port=6380):
     server = await asyncio.start_server(handle_request, host, port)
     asyncio.create_task(expiration_sweeper(store))
+    asyncio.create_task(schedule_snapshot(store))
 
     async with server:
         await server.serve_forever()

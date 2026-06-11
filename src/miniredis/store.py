@@ -2,8 +2,10 @@ import time
 import math
 import asyncio
 from collections import deque
+from multiprocessing import set_start_method, Process
 
 from miniredis.custom_data_structures import RandomDict, SortedSet
+from miniredis import _rdb
 
 class Store:
     def __init__(self):
@@ -15,6 +17,16 @@ class Store:
 
         if sample:
             self.exists(*sample)
+    
+    def _snapshot(self, data, ttl, path) -> None:
+        _rdb.dump(data, ttl, path)
+    
+    def snapshot(self) -> None:
+        set_start_method("fork")
+        path = "dump.rdb"
+        p = Process(target=self._snapshot, args=(self._data, self._ttl, path))
+        p.start()
+        p.join()
     
     def is_valid_value_type(self, key: bytes, allowed_type: type) -> bool:
         if not self.exists(key):
@@ -340,13 +352,17 @@ class Store:
             if score is not None:
                 sorted_set.delete(score, member)
                 count += 1
-        
-        return count
 
+        return count
 
 async def expiration_sweeper(store: Store) -> None:
     while True:
         await asyncio.sleep(1)
         store.sample_and_expire()
+
+async def schedule_snapshot(store: Store) -> None:
+    while True:
+        await asyncio.sleep(3600)
+        store.snapshot()
 
 store = Store()
