@@ -41,6 +41,7 @@
 
 static PyObject *cached_deque_type = NULL;
 static PyObject *cached_sorted_set_type = NULL;
+static PyObject *cached_random_dict_type = NULL;
 
 
 /* ---------- RDB opcodes and type bytes --------------------------------- */
@@ -288,14 +289,42 @@ type_byte_for_value(PyObject *value, uint8_t *out)
 static PyObject *
 rdb_dump(PyObject *self, PyObject *args)
 {
-    PyObject *data;     /* dict[bytes, value]                        */
-    PyObject *ttl;      /* dict[bytes, float] (absolute unix seconds)*/
+    PyObject *data;     /* dict[bytes, value]                              */
+    PyObject *ttl_obj;  /* dict[bytes, float] OR RandomDict (caller's      */
+                        /*   convenience -- we accept either)              */
     const char *path;
 
-    if (!PyArg_ParseTuple(args, "O!O!s",
+    if (!PyArg_ParseTuple(args, "O!Os",
                           &PyDict_Type, &data,
-                          &PyDict_Type, &ttl,
+                          &ttl_obj,
                           &path)) {
+        return NULL;
+    }
+
+    /*
+     * Accept either a plain dict (tests sometimes construct one directly)
+     * or a RandomDict (what the live Store uses). For RandomDict we extract
+     * its internal `_data` dict so the rest of this function can stay
+     * uniform on PyDict_GetItem / PyDict_Size.
+     */
+    PyObject *ttl;          /* the dict we actually walk           */
+    PyObject *ttl_owned = NULL;  /* non-NULL only if we own a ref to it */
+    if (PyDict_CheckExact(ttl_obj)) {
+        ttl = ttl_obj;       /* borrowed */
+    } else if ((PyObject *)Py_TYPE(ttl_obj) == cached_random_dict_type) {
+        ttl_owned = PyObject_GetAttrString(ttl_obj, "_data");
+        if (ttl_owned == NULL) return NULL;
+        if (!PyDict_CheckExact(ttl_owned)) {
+            Py_DECREF(ttl_owned);
+            PyErr_SetString(PyExc_TypeError,
+                            "RandomDict._data is not a dict");
+            return NULL;
+        }
+        ttl = ttl_owned;
+    } else {
+        PyErr_Format(PyExc_TypeError,
+                     "ttl argument must be dict or RandomDict, not %s",
+                     Py_TYPE(ttl_obj)->tp_name);
         return NULL;
     }
 
@@ -304,6 +333,7 @@ rdb_dump(PyObject *self, PyObject *args)
     char *tmp_path = (char *)PyMem_Malloc(plen + 5);  /* + ".tmp\0" */
     if (tmp_path == NULL) {
         PyErr_NoMemory();
+        Py_XDECREF(ttl_owned);
         return NULL;
     }
     memcpy(tmp_path, path, plen);
@@ -313,6 +343,7 @@ rdb_dump(PyObject *self, PyObject *args)
     if (fp == NULL) {
         PyErr_SetFromErrnoWithFilename(PyExc_OSError, tmp_path);
         PyMem_Free(tmp_path);
+        Py_XDECREF(ttl_owned);
         return NULL;
     }
 
@@ -389,12 +420,14 @@ rdb_dump(PyObject *self, PyObject *args)
     }
 
     PyMem_Free(tmp_path);
+    Py_XDECREF(ttl_owned);
     Py_RETURN_NONE;
 
 fail:
     if (fp != NULL) fclose(fp);
     unlink(tmp_path);
     PyMem_Free(tmp_path);
+    Py_XDECREF(ttl_owned);
     return NULL;
 }
 
@@ -642,7 +675,7 @@ rdb_load(PyObject *self, PyObject *args)
         return NULL;
     }
 
-    PyObject *data = NULL, *ttl = NULL, *result = NULL;
+    PyObject *data = NULL, *ttl = NULL, *ttl_set = NULL, *result = NULL;
 
     /* Header: 9 bytes total (5 magic + 4 ASCII version). */
     char header[9];
@@ -656,8 +689,14 @@ rdb_load(PyObject *self, PyObject *args)
 
     data = PyDict_New();
     if (data == NULL) goto out;
-    ttl = PyDict_New();
+
+    /* ttl is a RandomDict (not a plain dict) so the store can drop it in
+     * place without conversion. Mirrors the decode_list / decode_zset
+     * pattern: construct the right type here, populate via its public API. */
+    ttl = PyObject_CallNoArgs(cached_random_dict_type);
     if (ttl == NULL) goto out;
+    ttl_set = PyObject_GetAttrString(ttl, "set");
+    if (ttl_set == NULL) goto out;
 
     /* Pending TTL applies to the next key encountered. */
     int has_pending_ttl = 0;
@@ -721,12 +760,14 @@ rdb_load(PyObject *self, PyObject *args)
                 Py_DECREF(key);
                 goto out;
             }
-            rc = PyDict_SetItem(ttl, key, ttl_seconds);
+            PyObject *rc_obj = PyObject_CallFunctionObjArgs(
+                ttl_set, key, ttl_seconds, NULL);
             Py_DECREF(ttl_seconds);
-            if (rc < 0) {
+            if (rc_obj == NULL) {
                 Py_DECREF(key);
                 goto out;
             }
+            Py_DECREF(rc_obj);
             has_pending_ttl = 0;
             pending_ttl_ms = 0;
         }
@@ -738,6 +779,7 @@ rdb_load(PyObject *self, PyObject *args)
 
 out:
     if (fp) fclose(fp);
+    Py_XDECREF(ttl_set);
     Py_XDECREF(data);
     Py_XDECREF(ttl);
     return result;  /* NULL on error (exception set); tuple on success. */
@@ -757,9 +799,10 @@ static PyMethodDef RdbMethods[] = {
      "Writes to <path>.tmp, fsyncs, and renames over `path`."},
 
     {"load", rdb_load, METH_VARARGS,
-     "load(path: str) -> tuple[dict, dict]\n\n"
-     "Read an RDB-format snapshot. Returns (data, ttl) where ttl maps\n"
-     "each key with an expiry to an absolute unix-seconds float."},
+     "load(path: str) -> tuple[dict, RandomDict]\n\n"
+     "Read an RDB-format snapshot. Returns (data, ttl) where data is a\n"
+     "plain dict and ttl is a RandomDict mapping each key with an expiry\n"
+     "to an absolute unix-seconds float."},
 
     {NULL, NULL, 0, NULL}
 };
@@ -792,7 +835,7 @@ PyInit__rdb(void)
         return NULL;
     }
 
-    /* Cache miniredis.custom_data_structures.SortedSet type. */
+    /* Cache miniredis.custom_data_structures.SortedSet and RandomDict. */
     PyObject *cds = PyImport_ImportModule("miniredis.custom_data_structures");
     if (cds == NULL) {
         Py_CLEAR(cached_deque_type);
@@ -800,9 +843,17 @@ PyInit__rdb(void)
         return NULL;
     }
     cached_sorted_set_type = PyObject_GetAttrString(cds, "SortedSet");
-    Py_DECREF(cds);
     if (cached_sorted_set_type == NULL) {
+        Py_DECREF(cds);
         Py_CLEAR(cached_deque_type);
+        Py_DECREF(m);
+        return NULL;
+    }
+    cached_random_dict_type = PyObject_GetAttrString(cds, "RandomDict");
+    Py_DECREF(cds);
+    if (cached_random_dict_type == NULL) {
+        Py_CLEAR(cached_deque_type);
+        Py_CLEAR(cached_sorted_set_type);
         Py_DECREF(m);
         return NULL;
     }

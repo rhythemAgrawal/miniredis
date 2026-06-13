@@ -1,11 +1,19 @@
 import time
 import math
 import asyncio
+import sys
+import os
+import gc
+import signal
 from collections import deque
-from multiprocessing import set_start_method, Process
+from pathlib import Path
 
 from miniredis.custom_data_structures import RandomDict, SortedSet
 from miniredis import _rdb
+from miniredis.config import config
+
+
+snapshot_pid = None
 
 class Store:
     def __init__(self):
@@ -18,16 +26,58 @@ class Store:
         if sample:
             self.exists(*sample)
     
-    def _snapshot(self, data, ttl, path) -> None:
-        _rdb.dump(data, ttl, path)
-    
-    def snapshot(self) -> None:
-        set_start_method("fork")
-        path = "dump.rdb"
-        p = Process(target=self._snapshot, args=(self._data, self._ttl, path))
-        p.start()
-        p.join()
-    
+    async def snapshot(self) -> None:
+        async def child_cleaner():
+            global snapshot_pid
+            try:
+                start = time.monotonic()
+                while time.monotonic() < start + config.max_save_timeout:
+                    await asyncio.sleep(0.1)
+                    pid, status = os.waitpid(snapshot_pid, os.WNOHANG)
+
+                    if pid == 0:
+                        continue
+
+                    if os.WIFEXITED(status):
+                        print(f"child {pid} exited, code {os.WEXITSTATUS(status)}")
+                    elif os.WIFSIGNALED(status):
+                        print(f"child {pid} killed by signal {os.WTERMSIG(status)}")
+                    
+                    return
+                
+                os.kill(snapshot_pid, signal.SIGKILL)
+                os.waitpid(snapshot_pid, 0)
+            except Exception as e:
+                print("Error while running snapshot process cleaner: %s" % e)
+            finally:
+                snapshot_pid = None
+                gc.unfreeze()
+
+        global snapshot_pid
+        
+        if snapshot_pid:
+            print("Snapshot save already in progress")
+            return
+
+        path = config.snapshot_path
+        gc.freeze()
+        pid = os.fork()
+
+        if pid == 0:
+            # Child process
+            gc.disable()
+
+            try:
+                _rdb.dump(self._data, self._ttl, path)
+            except Exception as e:
+                print("Snapshot save gave error: %s" % e)
+                os._exit(1)
+
+            os._exit(0)
+        else:
+            snapshot_pid = pid
+            await child_cleaner()
+
     def is_valid_value_type(self, key: bytes, allowed_type: type) -> bool:
         if not self.exists(key):
             return True
@@ -363,6 +413,25 @@ async def expiration_sweeper(store: Store) -> None:
 async def schedule_snapshot(store: Store) -> None:
     while True:
         await asyncio.sleep(3600)
-        store.snapshot()
 
-store = Store()
+        try:
+            await store.snapshot()
+        except Exception as e:
+            print("Error while running snapshot: %s" % e)
+
+def get_store() -> Store:
+    path = Path(config.snapshot_path)
+    store = Store()
+
+    if path.is_file():
+        try:
+            data, ttl = _rdb.load(str(path))
+            store._data = data
+            store._ttl = ttl
+        except Exception as e:
+            # To-do: Log this exception after logging is enabled
+            print(f"snapshot load failed: {e}", file=sys.stderr)
+    
+    return store
+
+store = get_store()
