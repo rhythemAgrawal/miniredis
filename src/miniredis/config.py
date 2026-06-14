@@ -1,6 +1,19 @@
-class Config:
-    def __init__(self, snapshot_path: str, max_save_timeout):
-        self.snapshot_path = snapshot_path
-        self.max_save_timeout = max_save_timeout
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
+from functools import cache
 
-config = Config("dump.rdb", 3600)
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False
+    )
+
+    snapshot_path: str = Field(default="dump.rdb")
+    max_save_timeout: int = Field(default=3600)
+
+@cache
+def get_settings():
+    return Settings()

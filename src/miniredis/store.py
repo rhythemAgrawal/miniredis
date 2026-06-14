@@ -11,7 +11,7 @@ from pathlib import Path
 
 from miniredis.custom_data_structures import RandomDict, SortedSet
 from miniredis import _rdb
-from miniredis.config import config
+from miniredis.config import get_settings
 
 
 snapshot_pid = None
@@ -31,9 +31,10 @@ class Store:
     async def snapshot(self) -> None:
         async def child_cleaner():
             global snapshot_pid
+            settings = get_settings()
             try:
                 start = time.monotonic()
-                while time.monotonic() < start + config.max_save_timeout:
+                while time.monotonic() < start + settings.max_save_timeout:
                     await asyncio.sleep(0.1)
                     pid, status = os.waitpid(snapshot_pid, os.WNOHANG)
 
@@ -61,7 +62,8 @@ class Store:
             logger.info("Snapshot save already in progress")
             return
 
-        path = config.snapshot_path
+        settings = get_settings()
+        path = settings.snapshot_path
         gc.freeze()
         pid = os.fork()
 
@@ -424,7 +426,8 @@ async def schedule_snapshot(store: Store) -> None:
             logger.error("Error while running snapshot", error=e)
 
 def get_store() -> Store:
-    path = Path(config.snapshot_path)
+    settings = get_settings()
+    path = Path(settings.snapshot_path)
     store = Store()
 
     if path.is_file():
