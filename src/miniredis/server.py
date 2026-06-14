@@ -1,11 +1,15 @@
 import asyncio
+import structlog
 
 from miniredis.protocol import read_command, ProtocolError, encode_error
 from miniredis.commands import dispatch
 from miniredis.store import store, expiration_sweeper, schedule_snapshot
 
 
+logger = structlog.get_logger()
+
 async def handle_request(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    logger.info("Connection estabilished with client")
     try:
         while True:
             command_args = await read_command(reader)
@@ -20,9 +24,11 @@ async def handle_request(reader: asyncio.StreamReader, writer: asyncio.StreamWri
     finally:
         writer.close()
         await writer.wait_closed()
+        logger.info("Connection closed with client")
 
 async def main(host="127.0.0.1", port=6380):
     server = await asyncio.start_server(handle_request, host, port)
+    logger.info("Server started")
     asyncio.create_task(expiration_sweeper(store))
     asyncio.create_task(schedule_snapshot(store))
 

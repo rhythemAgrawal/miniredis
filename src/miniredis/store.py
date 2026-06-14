@@ -5,6 +5,7 @@ import sys
 import os
 import gc
 import signal
+import structlog
 from collections import deque
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from miniredis.config import config
 
 
 snapshot_pid = None
+logger = structlog.get_logger()
 
 class Store:
     def __init__(self):
@@ -39,16 +41,16 @@ class Store:
                         continue
 
                     if os.WIFEXITED(status):
-                        print(f"child {pid} exited, code {os.WEXITSTATUS(status)}")
+                        logger.info(f"child {pid} exited, code {os.WEXITSTATUS(status)}")
                     elif os.WIFSIGNALED(status):
-                        print(f"child {pid} killed by signal {os.WTERMSIG(status)}")
+                        logger.info(f"child {pid} killed by signal {os.WTERMSIG(status)}")
                     
                     return
                 
                 os.kill(snapshot_pid, signal.SIGKILL)
                 os.waitpid(snapshot_pid, 0)
             except Exception as e:
-                print("Error while running snapshot process cleaner: %s" % e)
+                logger.error("Error while running snapshot process cleaner", error=e)
             finally:
                 snapshot_pid = None
                 gc.unfreeze()
@@ -56,7 +58,7 @@ class Store:
         global snapshot_pid
         
         if snapshot_pid:
-            print("Snapshot save already in progress")
+            logger.info("Snapshot save already in progress")
             return
 
         path = config.snapshot_path
@@ -70,7 +72,7 @@ class Store:
             try:
                 _rdb.dump(self._data, self._ttl, path)
             except Exception as e:
-                print("Snapshot save gave error: %s" % e)
+                logger.error("Snapshot save gave error", error=e)
                 os._exit(1)
 
             os._exit(0)
@@ -408,6 +410,7 @@ class Store:
 async def expiration_sweeper(store: Store) -> None:
     while True:
         await asyncio.sleep(1)
+        logger.info("Running expiration sweep")
         store.sample_and_expire()
 
 async def schedule_snapshot(store: Store) -> None:
@@ -415,9 +418,10 @@ async def schedule_snapshot(store: Store) -> None:
         await asyncio.sleep(3600)
 
         try:
+            logger.info("Running snapshot save")
             await store.snapshot()
         except Exception as e:
-            print("Error while running snapshot: %s" % e)
+            logger.error("Error while running snapshot", error=e)
 
 def get_store() -> Store:
     path = Path(config.snapshot_path)
@@ -429,8 +433,7 @@ def get_store() -> Store:
             store._data = data
             store._ttl = ttl
         except Exception as e:
-            # To-do: Log this exception after logging is enabled
-            print(f"snapshot load failed: {e}", file=sys.stderr)
+            logger.error("Snapshot load failed", error=e)
     
     return store
 
