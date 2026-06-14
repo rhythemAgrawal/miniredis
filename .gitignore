@@ -12,3 +12,6 @@ wheels/
 
 # 3rd party files
 .claude/
+
+# Env file
+.env
