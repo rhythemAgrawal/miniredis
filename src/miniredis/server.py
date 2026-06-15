@@ -4,16 +4,19 @@ import structlog
 from miniredis.protocol import read_command, ProtocolError, encode_error
 from miniredis.commands import dispatch
 from miniredis.store import store, expiration_sweeper, schedule_snapshot
+from miniredis.client import ClientState
 
 
 logger = structlog.get_logger()
 
 async def handle_request(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     logger.info("Connection estabilished with client")
+    client = ClientState()
+
     try:
         while True:
             command_args = await read_command(reader)
-            response = await dispatch(command_args)
+            response = await dispatch(command_args, client)
             writer.write(response)
             await writer.drain()
     except ProtocolError as e:
