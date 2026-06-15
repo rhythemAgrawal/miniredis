@@ -265,6 +265,7 @@ async def exec(argv: list[bytes], client: ClientState) -> bytes:
         return encode_error("ERR EXEC without MULTI")
 
     if client.abort_transaction:
+        client.clear_transaction()
         return encode_error("EXECABORT Transaction discarded because of previous errors")
 
     commands = client.get_commands()

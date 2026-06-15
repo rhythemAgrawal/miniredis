@@ -159,3 +159,107 @@ def test_sorted_set_infinity_scores(client):
     assert client.zrange("z", 0, -1) == [b"b", b"c", b"a"]
     assert client.zrangebyscore("z", float("-inf"), float("inf")) == [b"b", b"c", b"a"]
     assert client.zrangebyscore("z", float("-inf"), 5) == [b"b", b"c"]
+
+
+# -- Transactions (MULTI / EXEC / DISCARD) over the wire --------------------
+
+
+def test_transaction_basic_pipeline(client):
+    """redis-py's pipeline(transaction=True) issues MULTI/EXEC."""
+    pipe = client.pipeline(transaction=True)
+    pipe.set("a", "1")
+    pipe.set("b", "2")
+    pipe.get("a")
+    pipe.get("b")
+    assert pipe.execute() == [True, True, b"1", b"2"]
+    # And the writes are visible to other commands afterward.
+    assert client.get("a") == b"1"
+    assert client.get("b") == b"2"
+
+
+def test_transaction_atomic_increment(client):
+    """The canonical example: increment, read, both in one batch."""
+    client.set("counter", "10")
+    pipe = client.pipeline(transaction=True)
+    pipe.incr("counter")
+    pipe.incr("counter")
+    pipe.get("counter")
+    assert pipe.execute() == [11, 12, b"12"]
+
+
+def test_transaction_discard(client):
+    """pipe.reset() discards the queued commands without running them."""
+    pipe = client.pipeline(transaction=True)
+    pipe.set("a", "queued_only")
+    pipe.reset()
+    # The SET was never applied.
+    assert client.get("a") is None
+
+
+def test_transaction_runtime_error_in_batch_does_not_abort_others(client):
+    """A WRONGTYPE inside the batch goes into the result array; the other
+    queued commands still execute."""
+    client.rpush("l", "x")   # l is now a list
+    pipe = client.pipeline(transaction=True)
+    pipe.get("l")            # WRONGTYPE at exec time
+    pipe.set("ok", "yes")    # still runs
+    results = pipe.execute(raise_on_error=False)
+    # First element: the WRONGTYPE error
+    assert isinstance(results[0], redis.exceptions.ResponseError)
+    assert "WRONGTYPE" in str(results[0])
+    # Second element: the SET went through
+    assert results[1] is True
+    assert client.get("ok") == b"yes"
+
+
+def test_transaction_queue_time_arity_error_aborts(client):
+    """A queue-time arity error must abort the whole batch with EXECABORT."""
+    # We can't easily synthesize a malformed command through redis-py's
+    # type-checked API, so drop to the raw connection and speak RESP directly.
+    raw = client.connection_pool.get_connection()
+    try:
+        raw.send_command("MULTI")
+        assert raw.read_response() == b"OK"
+
+        # Send a valid SET, get +QUEUED.
+        raw.send_command("SET", "k", "v")
+        assert raw.read_response() == b"QUEUED"
+
+        # Send GET with no args -- arity error, txn aborted.
+        raw.send_command("GET")
+        with pytest.raises(redis.exceptions.ResponseError):
+            raw.read_response()
+
+        # EXEC must return EXECABORT. (redis-py strips the prefix when raising,
+        # so we match against the rest of the message.)
+        raw.send_command("EXEC")
+        with pytest.raises(redis.exceptions.ResponseError, match="discarded"):
+            raw.read_response()
+
+        # After EXECABORT the connection is cleanly out of the transaction,
+        # so we can keep using it. The queued SET was rejected with the batch.
+        raw.send_command("GET", "k")
+        assert raw.read_response() is None
+    finally:
+        client.connection_pool.release(raw)
+
+
+def test_multiple_clients_have_independent_transactions(miniredis_server):
+    """Two TCP connections each have their own MULTI state."""
+    host, port = miniredis_server
+    a = redis.Redis(host=host, port=port)
+    b = redis.Redis(host=host, port=port)
+    try:
+        pipe_a = a.pipeline(transaction=True)
+        pipe_a.set("shared", "from_a")
+
+        # While A's pipeline is queued, B can write through immediately.
+        assert b.set("shared", "from_b") is True
+        assert b.get("shared") == b"from_b"
+
+        # Now A's EXEC overwrites.
+        assert pipe_a.execute() == [True]
+        assert b.get("shared") == b"from_a"
+    finally:
+        a.close()
+        b.close()

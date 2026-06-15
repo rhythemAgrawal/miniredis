@@ -9,6 +9,7 @@ name) so that handlers like ``set`` don't shadow Python builtins in this file.
 import pytest
 
 import miniredis.commands as commands
+from miniredis.client import ClientState
 from miniredis.custom_data_structures import RandomDict
 from miniredis.store import store
 
@@ -24,6 +25,12 @@ def reset_store():
     store._ttl = RandomDict()
 
 
+@pytest.fixture
+def client() -> ClientState:
+    """A fresh per-connection ClientState for tests that go through dispatch."""
+    return ClientState()
+
+
 def _int(resp: bytes) -> int:
     """Decode a RESP integer reply (:<n>\\r\\n) into a Python int."""
     assert resp.startswith(b":"), f"expected integer reply, got {resp!r}"
@@ -31,16 +38,16 @@ def _int(resp: bytes) -> int:
 
 
 class TestDispatch:
-    async def test_empty_command_is_an_error(self):
-        assert (await commands.dispatch([])).startswith(b"-ERR")
+    async def test_empty_command_is_an_error(self, client):
+        assert (await commands.dispatch([], client)).startswith(b"-ERR")
 
-    async def test_unknown_command_reports_the_name(self):
-        resp = await commands.dispatch([b"NOPE"])
+    async def test_unknown_command_reports_the_name(self, client):
+        resp = await commands.dispatch([b"NOPE"], client)
         assert resp.startswith(b"-ERR")
         assert b"NOPE" in resp
 
-    async def test_command_name_is_case_insensitive(self):
-        assert await commands.dispatch([b"ping"]) == b"+PONG\r\n"
+    async def test_command_name_is_case_insensitive(self, client):
+        assert await commands.dispatch([b"ping"], client) == b"+PONG\r\n"
 
 
 class TestPingEcho:
@@ -50,14 +57,15 @@ class TestPingEcho:
     async def test_ping_echoes_its_argument(self):
         assert await commands.ping([b"hello"]) == b"$5\r\nhello\r\n"
 
-    async def test_ping_with_too_many_args_errors(self):
-        assert (await commands.ping([b"a", b"b"])).startswith(b"-ERR")
+    async def test_ping_with_too_many_args_errors(self, client):
+        # Arity validation lives in dispatch now; PING is (0, 1).
+        assert (await commands.dispatch([b"PING", b"a", b"b"], client)).startswith(b"-ERR")
 
     async def test_echo(self):
         assert await commands.echo([b"hi"]) == b"$2\r\nhi\r\n"
 
-    async def test_echo_wrong_arity_errors(self):
-        assert (await commands.echo([])).startswith(b"-ERR")
+    async def test_echo_wrong_arity_errors(self, client):
+        assert (await commands.dispatch([b"ECHO"], client)).startswith(b"-ERR")
 
 
 class TestGetSet:
@@ -71,8 +79,8 @@ class TestGetSet:
     async def test_set_wrong_arity_errors(self):
         assert (await commands.set([b"only"])).startswith(b"-ERR")
 
-    async def test_get_wrong_arity_errors(self):
-        assert (await commands.get([b"a", b"b"])).startswith(b"-ERR")
+    async def test_get_wrong_arity_errors(self, client):
+        assert (await commands.dispatch([b"GET", b"a", b"b"], client)).startswith(b"-ERR")
 
     async def test_set_with_ex_sets_ttl_in_seconds(self):
         assert await commands.set([b"k", b"v", b"EX", b"100"]) == b"+OK\r\n"
@@ -98,8 +106,8 @@ class TestDelExists:
         await commands.set([b"b", b"2"])
         assert _int(await commands.delete([b"a", b"b", b"missing"])) == 2
 
-    async def test_del_wrong_arity_errors(self):
-        assert (await commands.delete([])).startswith(b"-ERR")
+    async def test_del_wrong_arity_errors(self, client):
+        assert (await commands.dispatch([b"DEL"], client)).startswith(b"-ERR")
 
     async def test_exists_counts_present(self):
         await commands.set([b"a", b"1"])
@@ -123,8 +131,8 @@ class TestCounters:
         await commands.set([b"c", b"abc"])
         assert (await commands.incr([b"c"])).startswith(b"-ERR")
 
-    async def test_incrby_wrong_arity_errors(self):
-        assert (await commands.incrby([b"c"])).startswith(b"-ERR")
+    async def test_incrby_wrong_arity_errors(self, client):
+        assert (await commands.dispatch([b"INCRBY", b"c"], client)).startswith(b"-ERR")
 
 
 class TestAppendStrlen:
@@ -137,8 +145,8 @@ class TestAppendStrlen:
         await commands.set([b"k", b"hello"])
         assert _int(await commands.strlen([b"k"])) == 5
 
-    async def test_strlen_wrong_arity_errors(self):
-        assert (await commands.strlen([])).startswith(b"-ERR")
+    async def test_strlen_wrong_arity_errors(self, client):
+        assert (await commands.dispatch([b"STRLEN"], client)).startswith(b"-ERR")
 
 
 class TestExpiry:
@@ -174,9 +182,9 @@ class TestListCommands:
     async def test_lpush_returns_length(self):
         assert _int(await commands.lpush([b"l", b"a", b"b"])) == 2
 
-    async def test_push_wrong_arity_errors(self):
-        assert (await commands.rpush([b"l"])).startswith(b"-ERR")
-        assert (await commands.lpush([b"l"])).startswith(b"-ERR")
+    async def test_push_wrong_arity_errors(self, client):
+        assert (await commands.dispatch([b"RPUSH", b"l"], client)).startswith(b"-ERR")
+        assert (await commands.dispatch([b"LPUSH", b"l"], client)).startswith(b"-ERR")
 
     async def test_lrange_returns_array_of_bulk_strings(self):
         await commands.rpush([b"l", b"a", b"b", b"c"])
@@ -189,8 +197,8 @@ class TestListCommands:
     async def test_lrange_non_integer_index_errors(self):
         assert (await commands.lrange([b"l", b"x", b"1"])).startswith(b"-ERR")
 
-    async def test_lrange_wrong_arity_errors(self):
-        assert (await commands.lrange([b"l", b"0"])).startswith(b"-ERR")
+    async def test_lrange_wrong_arity_errors(self, client):
+        assert (await commands.dispatch([b"LRANGE", b"l", b"0"], client)).startswith(b"-ERR")
 
     async def test_lpop_without_count_returns_bulk_string(self):
         await commands.rpush([b"l", b"a", b"b"])
@@ -218,8 +226,8 @@ class TestListCommands:
         await commands.rpush([b"l", b"a"])
         assert (await commands.lpop([b"l", b"x"])).startswith(b"-ERR")
 
-    async def test_lpop_too_many_args_errors(self):
-        assert (await commands.lpop([b"l", b"1", b"extra"])).startswith(b"-ERR")
+    async def test_lpop_too_many_args_errors(self, client):
+        assert (await commands.dispatch([b"LPOP", b"l", b"1", b"extra"], client)).startswith(b"-ERR")
 
     async def test_llen(self):
         await commands.rpush([b"l", b"a", b"b"])
@@ -233,8 +241,8 @@ class TestHashCommands:
     async def test_hset_even_arg_count_errors(self):
         assert (await commands.hset([b"h", b"a"])).startswith(b"-ERR")  # missing value
 
-    async def test_hset_too_few_args_errors(self):
-        assert (await commands.hset([b"h"])).startswith(b"-ERR")
+    async def test_hset_too_few_args_errors(self, client):
+        assert (await commands.dispatch([b"HSET", b"h"], client)).startswith(b"-ERR")
 
     async def test_hget(self):
         await commands.hset([b"h", b"f", b"v"])
@@ -244,15 +252,15 @@ class TestHashCommands:
         await commands.hset([b"h", b"f", b"v"])
         assert await commands.hget([b"h", b"nope"]) == b"$-1\r\n"
 
-    async def test_hget_wrong_arity_errors(self):
-        assert (await commands.hget([b"h"])).startswith(b"-ERR")
+    async def test_hget_wrong_arity_errors(self, client):
+        assert (await commands.dispatch([b"HGET", b"h"], client)).startswith(b"-ERR")
 
     async def test_hdel_returns_count(self):
         await commands.hset([b"h", b"a", b"1", b"b", b"2"])
         assert _int(await commands.hdel([b"h", b"a", b"missing"])) == 1
 
-    async def test_hdel_wrong_arity_errors(self):
-        assert (await commands.hdel([b"h"])).startswith(b"-ERR")
+    async def test_hdel_wrong_arity_errors(self, client):
+        assert (await commands.dispatch([b"HDEL", b"h"], client)).startswith(b"-ERR")
 
     async def test_hgetall_returns_flat_array(self):
         await commands.hset([b"h", b"a", b"1", b"b", b"2"])
@@ -273,40 +281,40 @@ class TestHashCommands:
 
 
 class TestWrongType:
-    async def test_string_command_on_a_list_key(self):
-        await commands.dispatch([b"RPUSH", b"l", b"a"])
-        assert (await commands.dispatch([b"GET", b"l"])).startswith(b"-WRONGTYPE")
+    async def test_string_command_on_a_list_key(self, client):
+        await commands.dispatch([b"RPUSH", b"l", b"a"], client)
+        assert (await commands.dispatch([b"GET", b"l"], client)).startswith(b"-WRONGTYPE")
 
-    async def test_list_command_on_a_string_key(self):
-        await commands.dispatch([b"SET", b"s", b"v"])
-        assert (await commands.dispatch([b"LPUSH", b"s", b"a"])).startswith(b"-WRONGTYPE")
+    async def test_list_command_on_a_string_key(self, client):
+        await commands.dispatch([b"SET", b"s", b"v"], client)
+        assert (await commands.dispatch([b"LPUSH", b"s", b"a"], client)).startswith(b"-WRONGTYPE")
 
-    async def test_hash_command_on_a_string_key(self):
-        await commands.dispatch([b"SET", b"s", b"v"])
-        assert (await commands.dispatch([b"HSET", b"s", b"f", b"v"])).startswith(b"-WRONGTYPE")
+    async def test_hash_command_on_a_string_key(self, client):
+        await commands.dispatch([b"SET", b"s", b"v"], client)
+        assert (await commands.dispatch([b"HSET", b"s", b"f", b"v"], client)).startswith(b"-WRONGTYPE")
 
-    async def test_list_command_on_a_hash_key(self):
-        await commands.dispatch([b"HSET", b"h", b"f", b"v"])
-        assert (await commands.dispatch([b"LPUSH", b"h", b"a"])).startswith(b"-WRONGTYPE")
+    async def test_list_command_on_a_hash_key(self, client):
+        await commands.dispatch([b"HSET", b"h", b"f", b"v"], client)
+        assert (await commands.dispatch([b"LPUSH", b"h", b"a"], client)).startswith(b"-WRONGTYPE")
 
-    async def test_type_agnostic_commands_work_across_types(self):
-        await commands.dispatch([b"RPUSH", b"l", b"a"])
-        assert await commands.dispatch([b"DEL", b"l"]) == b":1\r\n"
-        await commands.dispatch([b"HSET", b"h", b"f", b"v"])
-        assert await commands.dispatch([b"EXISTS", b"h"]) == b":1\r\n"
+    async def test_type_agnostic_commands_work_across_types(self, client):
+        await commands.dispatch([b"RPUSH", b"l", b"a"], client)
+        assert await commands.dispatch([b"DEL", b"l"], client) == b":1\r\n"
+        await commands.dispatch([b"HSET", b"h", b"f", b"v"], client)
+        assert await commands.dispatch([b"EXISTS", b"h"], client) == b":1\r\n"
 
-    async def test_missing_key_passes_the_type_check(self):
+    async def test_missing_key_passes_the_type_check(self, client):
         # A command against a missing key should run, not raise WRONGTYPE.
-        assert await commands.dispatch([b"GET", b"missing"]) == b"$-1\r\n"
-        assert _int(await commands.dispatch([b"LPUSH", b"newlist", b"a"])) == 1
+        assert await commands.dispatch([b"GET", b"missing"], client) == b"$-1\r\n"
+        assert _int(await commands.dispatch([b"LPUSH", b"newlist", b"a"], client)) == 1
 
-    async def test_sorted_set_command_on_a_string_key(self):
-        await commands.dispatch([b"SET", b"s", b"v"])
-        assert (await commands.dispatch([b"ZADD", b"s", b"1", b"a"])).startswith(b"-WRONGTYPE")
+    async def test_sorted_set_command_on_a_string_key(self, client):
+        await commands.dispatch([b"SET", b"s", b"v"], client)
+        assert (await commands.dispatch([b"ZADD", b"s", b"1", b"a"], client)).startswith(b"-WRONGTYPE")
 
-    async def test_string_command_on_a_sorted_set_key(self):
-        await commands.dispatch([b"ZADD", b"z", b"1", b"a"])
-        assert (await commands.dispatch([b"GET", b"z"])).startswith(b"-WRONGTYPE")
+    async def test_string_command_on_a_sorted_set_key(self, client):
+        await commands.dispatch([b"ZADD", b"z", b"1", b"a"], client)
+        assert (await commands.dispatch([b"GET", b"z"], client)).startswith(b"-WRONGTYPE")
 
 
 class TestSortedSetCommands:
@@ -330,8 +338,8 @@ class TestSortedSetCommands:
     async def test_zscore_missing_is_nil(self):
         assert await commands.zscore([b"z", b"a"]) == b"$-1\r\n"
 
-    async def test_zscore_wrong_arity_errors(self):
-        assert (await commands.zscore([b"z"])).startswith(b"-ERR")
+    async def test_zscore_wrong_arity_errors(self, client):
+        assert (await commands.dispatch([b"ZSCORE", b"z"], client)).startswith(b"-ERR")
 
     async def test_zrank(self):
         await commands.zadd([b"z", b"1", b"a", b"2", b"b"])
@@ -370,8 +378,8 @@ class TestSortedSetCommands:
         await commands.zadd([b"z", b"1", b"a", b"2", b"b"])
         assert _int(await commands.zrem([b"z", b"a", b"missing"])) == 1
 
-    async def test_zrem_wrong_arity_errors(self):
-        assert (await commands.zrem([b"z"])).startswith(b"-ERR")
+    async def test_zrem_wrong_arity_errors(self, client):
+        assert (await commands.dispatch([b"ZREM", b"z"], client)).startswith(b"-ERR")
 
     async def test_zadd_and_zscore_with_infinity(self):
         await commands.zadd([b"z", b"+inf", b"a", b"-inf", b"b", b"5", b"c"])
@@ -385,3 +393,210 @@ class TestSortedSetCommands:
             b"*3\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\na\r\n"
         assert await commands.zrangebyscore([b"z", b"-inf", b"5"]) == \
             b"*2\r\n$1\r\nb\r\n$1\r\nc\r\n"
+
+
+class TestTransactionBasics:
+    """The MULTI/EXEC/DISCARD state machine, exercised through dispatch.
+
+    Going through dispatch (rather than calling multi/exec/discard directly)
+    is what tests the *integration* with the dispatcher's queue/skip logic.
+    """
+
+    async def test_multi_returns_ok_and_enters_transaction(self, client):
+        assert await commands.dispatch([b"MULTI"], client) == b"+OK\r\n"
+        assert client.in_transaction is True
+
+    async def test_command_inside_multi_returns_queued(self, client):
+        await commands.dispatch([b"MULTI"], client)
+        assert await commands.dispatch([b"SET", b"k", b"v"], client) == b"+QUEUED\r\n"
+        assert await commands.dispatch([b"INCR", b"counter"], client) == b"+QUEUED\r\n"
+
+    async def test_queue_preserves_insertion_order(self, client):
+        await commands.dispatch([b"MULTI"], client)
+        await commands.dispatch([b"SET", b"a", b"1"], client)
+        await commands.dispatch([b"SET", b"b", b"2"], client)
+        await commands.dispatch([b"SET", b"c", b"3"], client)
+        assert client.get_commands() == [
+            [b"SET", b"a", b"1"],
+            [b"SET", b"b", b"2"],
+            [b"SET", b"c", b"3"],
+        ]
+
+    async def test_exec_runs_queued_commands_in_order(self, client):
+        await commands.dispatch([b"MULTI"], client)
+        await commands.dispatch([b"SET", b"a", b"1"], client)
+        await commands.dispatch([b"INCR", b"a"], client)
+        await commands.dispatch([b"GET", b"a"], client)
+        # EXEC returns RESP array: [+OK, :2, $1\r\n2]
+        assert await commands.dispatch([b"EXEC"], client) == \
+            b"*3\r\n+OK\r\n:2\r\n$1\r\n2\r\n"
+
+    async def test_exec_clears_transaction_state(self, client):
+        await commands.dispatch([b"MULTI"], client)
+        await commands.dispatch([b"SET", b"k", b"v"], client)
+        await commands.dispatch([b"EXEC"], client)
+        assert client.in_transaction is False
+        assert client.get_commands() == []
+        assert client.abort_transaction is False
+
+    async def test_discard_clears_state_and_returns_ok(self, client):
+        await commands.dispatch([b"MULTI"], client)
+        await commands.dispatch([b"SET", b"k", b"v"], client)
+        assert await commands.dispatch([b"DISCARD"], client) == b"+OK\r\n"
+        assert client.in_transaction is False
+        assert client.get_commands() == []
+        # And the SET was not applied (it was only queued, never executed).
+        assert await commands.dispatch([b"GET", b"k"], client) == b"$-1\r\n"
+
+    async def test_empty_multi_exec_returns_empty_array(self, client):
+        await commands.dispatch([b"MULTI"], client)
+        assert await commands.dispatch([b"EXEC"], client) == b"*0\r\n"
+
+
+class TestTransactionControlOutsideMulti:
+    async def test_exec_without_multi_returns_error(self, client):
+        resp = await commands.dispatch([b"EXEC"], client)
+        assert resp.startswith(b"-ERR")
+        assert b"without MULTI" in resp
+
+    async def test_discard_without_multi_returns_error(self, client):
+        resp = await commands.dispatch([b"DISCARD"], client)
+        assert resp.startswith(b"-ERR")
+        assert b"without MULTI" in resp
+
+    async def test_nested_multi_returns_error(self, client):
+        await commands.dispatch([b"MULTI"], client)
+        resp = await commands.dispatch([b"MULTI"], client)
+        assert resp.startswith(b"-ERR")
+        assert b"nested" in resp
+
+    async def test_nested_multi_does_not_break_existing_transaction(self, client):
+        # The outer MULTI should still be active; queued commands intact.
+        await commands.dispatch([b"MULTI"], client)
+        await commands.dispatch([b"SET", b"k", b"v"], client)
+        await commands.dispatch([b"MULTI"], client)   # rejected with -ERR
+        assert client.in_transaction is True
+        assert client.get_commands() == [[b"SET", b"k", b"v"]]
+
+
+class TestTransactionAbortSemantics:
+    async def test_unknown_command_during_multi_aborts_transaction(self, client):
+        await commands.dispatch([b"MULTI"], client)
+        await commands.dispatch([b"SET", b"k", b"v"], client)
+        # Unknown command during MULTI: returns error AND flags the txn aborted.
+        resp = await commands.dispatch([b"NOPE"], client)
+        assert resp.startswith(b"-ERR")
+        assert client.abort_transaction is True
+
+        # EXEC must now return EXECABORT and run nothing.
+        exec_resp = await commands.dispatch([b"EXEC"], client)
+        assert exec_resp.startswith(b"-EXECABORT")
+
+        # And the SET was *not* applied. The client is cleanly out of the
+        # transaction after EXECABORT, so we can reuse it to inspect.
+        assert await commands.dispatch([b"GET", b"k"], client) == b"$-1\r\n"
+
+    async def test_execabort_clears_transaction_state(self, client):
+        # Regression for the EXECABORT cleanup bug: after a failed
+        # transaction, the client must be cleanly out of transaction state
+        # so a fresh MULTI works without an intervening DISCARD.
+        await commands.dispatch([b"MULTI"], client)
+        await commands.dispatch([b"NOPE"], client)         # marks abort
+        assert (await commands.dispatch([b"EXEC"], client)).startswith(b"-EXECABORT")
+
+        assert client.in_transaction is False
+        assert client.abort_transaction is False
+        assert client.get_commands() == []
+
+        # And a fresh MULTI should succeed immediately.
+        assert await commands.dispatch([b"MULTI"], client) == b"+OK\r\n"
+        assert await commands.dispatch([b"SET", b"k", b"v"], client) == b"+QUEUED\r\n"
+        assert await commands.dispatch([b"EXEC"], client) == b"*1\r\n+OK\r\n"
+        assert await commands.dispatch([b"GET", b"k"], client) == b"$1\r\nv\r\n"
+
+    async def test_queue_time_arity_error_aborts_transaction(self, client):
+        await commands.dispatch([b"MULTI"], client)
+        await commands.dispatch([b"SET", b"k", b"v"], client)
+        # GET with no key: arity violation -- caught at queue time by dispatch.
+        resp = await commands.dispatch([b"GET"], client)
+        assert resp.startswith(b"-ERR")
+        assert client.abort_transaction is True
+        # EXEC -> EXECABORT, queued SET not applied.
+        assert (await commands.dispatch([b"EXEC"], client)).startswith(b"-EXECABORT")
+
+    async def test_discard_clears_abort_flag(self, client):
+        await commands.dispatch([b"MULTI"], client)
+        await commands.dispatch([b"NOPE"], client)   # marks abort
+        await commands.dispatch([b"DISCARD"], client)
+        assert client.abort_transaction is False
+        assert client.in_transaction is False
+
+
+class TestTransactionRuntimeErrors:
+    """Runtime errors inside a queued command appear in the EXEC result array;
+    they do NOT abort the rest of the batch. This is real-Redis semantics."""
+
+    async def test_wrongtype_inside_multi_is_a_runtime_error(self, client):
+        # WRONGTYPE check is deferred to EXEC time; the command queues fine.
+        await commands.dispatch([b"RPUSH", b"l", b"a"], client)  # `l` is now a list
+        await commands.dispatch([b"MULTI"], client)
+        # Queue a GET on a list-typed key -- queue-time succeeds.
+        assert await commands.dispatch([b"GET", b"l"], client) == b"+QUEUED\r\n"
+        # Queue a valid LRANGE that comes after.
+        assert await commands.dispatch([b"LRANGE", b"l", b"0", b"-1"], client) == b"+QUEUED\r\n"
+
+        resp = await commands.dispatch([b"EXEC"], client)
+        # Two replies: first is -WRONGTYPE, second is the LRANGE array.
+        assert b"-WRONGTYPE" in resp
+        assert b"$1\r\na\r\n" in resp   # LRANGE still ran
+
+    async def test_hset_parity_error_at_exec_does_not_abort_batch(self, client):
+        await commands.dispatch([b"MULTI"], client)
+        # HSET with even argv (missing value for second field) -- min_args=3
+        # passes dispatch, parity check fires inside the handler at EXEC.
+        assert await commands.dispatch([b"HSET", b"h", b"f1", b"v1", b"f2"], client) \
+            == b"+QUEUED\r\n"
+        assert await commands.dispatch([b"SET", b"k", b"v"], client) == b"+QUEUED\r\n"
+
+        resp = await commands.dispatch([b"EXEC"], client)
+        # Two replies in the array: first is the parity error, second is +OK.
+        assert b"-ERR wrong number of arguments" in resp
+        assert b"+OK" in resp
+        # The SET DID get applied -- runtime errors don't abort the batch.
+        assert await commands.dispatch([b"GET", b"k"], client) == b"$1\r\nv\r\n"
+
+
+class TestTransactionIsolation:
+    async def test_two_clients_have_independent_transactions(self):
+        # Two separate connections (ClientStates) -- A's MULTI must not
+        # affect B, and vice versa. The shared `store` is module-global,
+        # but transaction state is per-connection.
+        a = ClientState()
+        b = ClientState()
+
+        await commands.dispatch([b"MULTI"], a)
+        await commands.dispatch([b"SET", b"shared", b"from_a"], a)
+
+        # B is not in a transaction; a normal SET goes through immediately.
+        assert await commands.dispatch([b"SET", b"shared", b"from_b"], b) == b"+OK\r\n"
+        # The store now has "from_b" (B's SET applied; A's still queued).
+        assert await commands.dispatch([b"GET", b"shared"], b) == b"$6\r\nfrom_b\r\n"
+
+        # Now run A's EXEC: it applies the queued SET, overwriting.
+        await commands.dispatch([b"EXEC"], a)
+        assert await commands.dispatch([b"GET", b"shared"], b) == b"$6\r\nfrom_a\r\n"
+
+
+class TestTransactionMaxArgs:
+    async def test_multi_with_extra_args_is_arity_error(self, client):
+        # max_args=0 was the bug-fix from earlier; verify it still bites.
+        resp = await commands.dispatch([b"MULTI", b"extra"], client)
+        assert resp.startswith(b"-ERR")
+        assert client.in_transaction is False
+
+    async def test_exec_with_extra_args_is_arity_error(self, client):
+        await commands.dispatch([b"MULTI"], client)
+        resp = await commands.dispatch([b"EXEC", b"extra"], client)
+        # arity error fires; since we're still in a transaction, this also
+        # flags abort. EXEC's actual error path doesn't execute.
+        assert resp.startswith(b"-ERR")
