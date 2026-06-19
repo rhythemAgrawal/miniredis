@@ -1,7 +1,6 @@
 import time
 import math
 import asyncio
-import sys
 import os
 import gc
 import signal

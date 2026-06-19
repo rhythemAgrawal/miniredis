@@ -7,6 +7,7 @@ from miniredis.protocol import encode_error, encode_simple_string, encode_bulk_s
 from miniredis.store import store
 from miniredis.custom_data_structures import SortedSet
 from miniredis.client import ClientState
+from miniredis.pubsub import channel_registry
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +287,23 @@ async def discard(argv: list[bytes], client: ClientState) -> bytes:
     client.clear_transaction()
     return encode_simple_string("OK")
 
+async def subscribe(argv: list[bytes], client: ClientState) -> None:
+    client.channels.sub_channel(argv)
+
+async def psubscribe(argv: list[bytes], client: ClientState) -> None:
+    client.channels.sub_pattern(argv)
+
+async def unsubscribe(argv: list[bytes], client: ClientState) -> None:
+    client.channels.unsub_channel(argv)
+
+async def punsubscribe(argv: list[bytes], client: ClientState) -> None:
+    client.channels.unsub_pchannel(argv)
+
+async def publish(argv: list[bytes]) -> bytes:
+    channel, message = argv[0], argv[1]
+    count = channel_registry.publish(channel, message)
+    return encode_integer(count)
+
 
 # ---------------------------------------------------------------------------
 # Command registry + dispatch.
@@ -298,7 +316,7 @@ class Command(NamedTuple):
     # The latter is used only by the transaction-control commands listed in
     # SKIP_QUEUE; dispatch() branches on that to decide which shape to call.
     # Callable[..., Awaitable[bytes]] accepts both.
-    handler: Callable[..., Awaitable[bytes]]
+    handler: Callable[..., Awaitable[bytes | None]]
     # The value type a key must already hold for this command to run. None
     # means the command is type-agnostic (DEL, EXISTS, TTL, ...) or takes no key.
     value_type: type | None = None
@@ -346,21 +364,34 @@ COMMANDS: dict[bytes, Command] = {
     b"MULTI":         Command(multi, None, 0, 0),
     b"EXEC":          Command(exec, None, 0, 0),
     b"DISCARD":       Command(discard, None, 0, 0),
+    b"SUBSCRIBE":     Command(subscribe, None, 1, None),
+    b"PSUBSCRIBE":    Command(psubscribe, None, 1, None),
+    b"UNSUBSCRIBE":   Command(unsubscribe, None, 0, None),
+    b"PUNSUBSCRIBE":  Command(punsubscribe, None, 0, None),
+    b"PUBLISH":       Command(publish, None, 2, 2),
 }
 
 SKIP_QUEUE = {b"MULTI", b"EXEC", b"DISCARD"}
+SUBSCRIBE_MODE_WHITELIST = {b"SUBSCRIBE", b"PSUBSCRIBE", b"UNSUBSCRIBE", b"PUNSUBSCRIBE", b"PING"}
+NEEDS_CLIENT = {b"MULTI", b"EXEC", b"DISCARD", b"SUBSCRIBE", b"PSUBSCRIBE", b"UNSUBSCRIBE", b"PUNSUBSCRIBE"}
+NOT_ALLOWED_IN_MULTI = {b"SUBSCRIBE", b"PSUBSCRIBE", b"UNSUBSCRIBE", b"PUNSUBSCRIBE"}
 
-async def dispatch(command_args: list[bytes], client: ClientState) -> bytes:
+async def dispatch(command_args: list[bytes], client: ClientState) -> bytes | None:
     if not command_args:
         return encode_error("ERR empty command")
 
     command_name = command_args[0].upper()
     command = COMMANDS.get(command_name)
 
-    if command is None:
+    if command is None or (client.in_transaction and command_name in NOT_ALLOWED_IN_MULTI):
         if client.in_transaction:
             client.mark_transaction_as_aborted()
+            if command_name in NOT_ALLOWED_IN_MULTI:
+                return encode_error(f"ERR '{command_name.decode()}' command not allowed in transactions")
         return encode_error(f"ERR Invalid command '{command_name.decode()}'")
+    
+    if client.is_subscribed and command_name not in SUBSCRIBE_MODE_WHITELIST:
+        return encode_error(f"ERR Can't execute '{command_name.decode()}' command in this context")
 
     argc = len(command_args) - 1   # not counting the command name itself
     # NOTE: `command.max_args is not None` (vs. just `command.max_args`) so
@@ -382,6 +413,6 @@ async def dispatch(command_args: list[bytes], client: ClientState) -> bytes:
         return encode_error("WRONGTYPE Operation against a key holding the wrong kind of value")
 
     # Transaction-control handlers take (argv, client); everything else just (argv).
-    if command_name in SKIP_QUEUE:
+    if command_name in NEEDS_CLIENT:
         return await command.handler(command_args[1:], client)
     return await command.handler(command_args[1:])

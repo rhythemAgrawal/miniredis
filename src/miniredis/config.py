@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     snapshot_path: str = Field(default="dump.rdb")
     max_save_timeout: int = Field(default=3600)
+    buffer_drain_timeout: int = Field(default=120)
 
 @cache
 def get_settings():

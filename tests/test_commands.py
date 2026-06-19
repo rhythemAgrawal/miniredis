@@ -6,12 +6,22 @@ fixture resets it before and after every test to keep them isolated.
 The module is imported as ``commands`` (rather than importing the handlers by
 name) so that handlers like ``set`` don't shadow Python builtins in this file.
 """
+from unittest.mock import MagicMock
+
 import pytest
 
 import miniredis.commands as commands
 from miniredis.client import ClientState
 from miniredis.custom_data_structures import RandomDict
 from miniredis.store import store
+
+
+def _make_client() -> ClientState:
+    """Build a ClientState with a mock StreamWriter for dispatch-only tests.
+
+    write_to_socket() is never spawned here, so the writer never gets used.
+    """
+    return ClientState(MagicMock())
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +38,7 @@ def reset_store():
 @pytest.fixture
 def client() -> ClientState:
     """A fresh per-connection ClientState for tests that go through dispatch."""
-    return ClientState()
+    return _make_client()
 
 
 def _int(resp: bytes) -> int:
@@ -571,8 +581,8 @@ class TestTransactionIsolation:
         # Two separate connections (ClientStates) -- A's MULTI must not
         # affect B, and vice versa. The shared `store` is module-global,
         # but transaction state is per-connection.
-        a = ClientState()
-        b = ClientState()
+        a = _make_client()
+        b = _make_client()
 
         await commands.dispatch([b"MULTI"], a)
         await commands.dispatch([b"SET", b"shared", b"from_a"], a)
