@@ -35,6 +35,17 @@ def reset_store():
     store._ttl = RandomDict()
 
 
+@pytest.fixture(autouse=True)
+def reset_pubsub_registry():
+    """Same idea as `reset_store` but for the channel_registry singleton."""
+    from miniredis.pubsub import channel_registry
+    channel_registry.channel_subs.clear()
+    channel_registry.pchannel_subs.clear()
+    yield
+    channel_registry.channel_subs.clear()
+    channel_registry.pchannel_subs.clear()
+
+
 @pytest.fixture
 def client() -> ClientState:
     """A fresh per-connection ClientState for tests that go through dispatch."""
@@ -610,3 +621,135 @@ class TestTransactionMaxArgs:
         # arity error fires; since we're still in a transaction, this also
         # flags abort. EXEC's actual error path doesn't execute.
         assert resp.startswith(b"-ERR")
+
+
+class TestPubSubSubscribeReplies:
+    """SUBSCRIBE/UNSUBSCRIBE/PSUBSCRIBE/PUNSUBSCRIBE return None from
+    dispatch (the handler writes ack frames directly to client.write_buffer)."""
+
+    async def test_subscribe_returns_none_and_writes_ack_to_buffer(self, client):
+        resp = await commands.dispatch([b"SUBSCRIBE", b"news"], client)
+        assert resp is None
+        ack = client.write_buffer.get_nowait()
+        assert ack.startswith(b"*3\r\n")
+        assert b"subscribe" in ack
+        assert b"news" in ack
+        # Subscription count = 1.
+        assert b":1\r\n" in ack
+        # And the client is now in subscribe mode.
+        assert client.is_subscribed is True
+
+    async def test_psubscribe_returns_none_and_writes_pack_to_buffer(self, client):
+        resp = await commands.dispatch([b"PSUBSCRIBE", b"news.*"], client)
+        assert resp is None
+        ack = client.write_buffer.get_nowait()
+        assert b"psubscribe" in ack
+        assert b"news.*" in ack
+        assert client.is_subscribed is True
+
+    async def test_unsubscribe_with_no_args_unsubs_all(self, client):
+        # Regression: this used to crash via "set changed size during iteration."
+        await commands.dispatch([b"SUBSCRIBE", b"a", b"b", b"c"], client)
+        # drain the three subscribe acks
+        for _ in range(3):
+            client.write_buffer.get_nowait()
+        resp = await commands.dispatch([b"UNSUBSCRIBE"], client)
+        assert resp is None
+        # Three unsubscribe acks follow, in some order.
+        msgs = [client.write_buffer.get_nowait() for _ in range(3)]
+        # Each is a 3-element array with "unsubscribe" + channel + dwindling count.
+        assert all(b"unsubscribe" in m for m in msgs)
+        assert client.is_subscribed is False
+
+
+class TestSubscribeMode:
+    """Once a client is in subscribe mode, only the whitelisted commands work."""
+
+    async def test_non_pubsub_command_in_subscribe_mode_is_rejected(self, client):
+        await commands.dispatch([b"SUBSCRIBE", b"x"], client)
+        client.write_buffer.get_nowait()    # drain the ack
+        resp = await commands.dispatch([b"GET", b"k"], client)
+        assert resp.startswith(b"-ERR")
+        assert b"in this context" in resp
+
+    async def test_ping_is_allowed_in_subscribe_mode(self, client):
+        # PING is the customary heartbeat for subscribers; must not error.
+        await commands.dispatch([b"SUBSCRIBE", b"x"], client)
+        client.write_buffer.get_nowait()
+        resp = await commands.dispatch([b"PING"], client)
+        assert resp == b"+PONG\r\n"
+
+    async def test_subscribe_commands_themselves_are_allowed_in_subscribe_mode(self, client):
+        await commands.dispatch([b"SUBSCRIBE", b"x"], client)
+        client.write_buffer.get_nowait()
+        # Can SUBSCRIBE to more, UNSUBSCRIBE, PSUBSCRIBE, PUNSUBSCRIBE freely.
+        assert await commands.dispatch([b"SUBSCRIBE", b"y"], client) is None
+        assert await commands.dispatch([b"PSUBSCRIBE", b"p.*"], client) is None
+        assert await commands.dispatch([b"UNSUBSCRIBE", b"x"], client) is None
+        assert await commands.dispatch([b"PUNSUBSCRIBE", b"p.*"], client) is None
+
+
+class TestSubscribeInsideMulti:
+    """SUBSCRIBE/PSUBSCRIBE/UNSUBSCRIBE/PUNSUBSCRIBE are *not* allowed inside
+    MULTI (a deliberate scope decision; see the long discussion of RESP2
+    EXEC array malformation when subscribe-mode commands run inside MULTI)."""
+
+    @pytest.mark.parametrize("cmd", [b"SUBSCRIBE", b"PSUBSCRIBE",
+                                      b"UNSUBSCRIBE", b"PUNSUBSCRIBE"])
+    async def test_subscribe_family_rejected_in_multi(self, client, cmd):
+        await commands.dispatch([b"MULTI"], client)
+        resp = await commands.dispatch([cmd, b"x"], client)
+        assert resp.startswith(b"-ERR")
+        assert b"not allowed in transactions" in resp
+        # And the transaction is now flagged for EXECABORT.
+        assert client.abort_transaction is True
+        assert (await commands.dispatch([b"EXEC"], client)).startswith(b"-EXECABORT")
+
+    async def test_publish_is_queueable_in_multi(self, client):
+        # PUBLISH is NOT a pubsub-state-change command and is allowed in MULTI.
+        await commands.dispatch([b"MULTI"], client)
+        queued = await commands.dispatch([b"PUBLISH", b"ch", b"msg"], client)
+        assert queued == b"+QUEUED\r\n"
+        # EXEC runs it; with no subscribers the count is 0.
+        result = await commands.dispatch([b"EXEC"], client)
+        assert result == b"*1\r\n:0\r\n"
+
+
+class TestPublishDispatch:
+    async def test_publish_with_no_subscribers_returns_zero(self, client):
+        resp = await commands.dispatch([b"PUBLISH", b"ch", b"hi"], client)
+        assert resp == b":0\r\n"
+
+    async def test_publish_delivers_to_subscriber_and_returns_count(self, client):
+        sub = _make_client()
+        # `sub` subscribes; `client` publishes.
+        await commands.dispatch([b"SUBSCRIBE", b"ch"], sub)
+        sub.write_buffer.get_nowait()    # drain ack
+
+        resp = await commands.dispatch([b"PUBLISH", b"ch", b"hello"], client)
+        assert resp == b":1\r\n"
+        msg = sub.write_buffer.get_nowait()
+        assert b"message" in msg
+        assert b"ch" in msg
+        assert b"hello" in msg
+
+    async def test_publish_count_includes_pattern_subscribers(self, client):
+        direct = _make_client()
+        pattern_sub = _make_client()
+        await commands.dispatch([b"SUBSCRIBE", b"news.tech"], direct)
+        await commands.dispatch([b"PSUBSCRIBE", b"news.*"], pattern_sub)
+        # Drain acks
+        direct.write_buffer.get_nowait()
+        pattern_sub.write_buffer.get_nowait()
+
+        resp = await commands.dispatch([b"PUBLISH", b"news.tech", b"story"], client)
+        # 1 direct + 1 pattern = 2 receivers
+        assert resp == b":2\r\n"
+        # And the right frame went to each.
+        assert b"message" in direct.write_buffer.get_nowait()
+        assert b"pmessage" in pattern_sub.write_buffer.get_nowait()
+
+    async def test_publish_wrong_arity_errors(self, client):
+        # PUBLISH has min=2, max=2 (channel + message).
+        assert (await commands.dispatch([b"PUBLISH", b"ch"], client)).startswith(b"-ERR")
+        assert (await commands.dispatch([b"PUBLISH"], client)).startswith(b"-ERR")

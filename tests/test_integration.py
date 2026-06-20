@@ -263,3 +263,164 @@ def test_multiple_clients_have_independent_transactions(miniredis_server):
     finally:
         a.close()
         b.close()
+
+
+# -- Pub/sub (SUBSCRIBE / PSUBSCRIBE / PUBLISH / UNSUBSCRIBE) over the wire ----
+
+
+def _drain_subscribe_acks(pubsub, n):
+    """Helper: read and discard the next N subscribe/psubscribe ack frames."""
+    for _ in range(n):
+        m = pubsub.get_message(timeout=1)
+        assert m is not None and m["type"] in {"subscribe", "psubscribe",
+                                                "unsubscribe", "punsubscribe"}
+
+
+def test_pubsub_basic_subscribe_and_publish(miniredis_server):
+    host, port = miniredis_server
+    sub = redis.Redis(host=host, port=port)
+    pub = redis.Redis(host=host, port=port)
+    try:
+        ps = sub.pubsub()
+        ps.subscribe("ch")
+        _drain_subscribe_acks(ps, 1)
+
+        # Publisher reports 1 receiver.
+        assert pub.publish("ch", "hello") == 1
+
+        msg = ps.get_message(timeout=1)
+        assert msg is not None
+        assert msg["type"] == "message"
+        assert msg["channel"] == b"ch"
+        assert msg["data"] == b"hello"
+    finally:
+        ps.close()
+        sub.close()
+        pub.close()
+
+
+def test_pubsub_publish_with_no_subscribers_returns_zero(client):
+    assert client.publish("nobody-here", "x") == 0
+
+
+def test_pubsub_multiple_subscribers_each_get_the_message(miniredis_server):
+    host, port = miniredis_server
+    a = redis.Redis(host=host, port=port)
+    b = redis.Redis(host=host, port=port)
+    pub = redis.Redis(host=host, port=port)
+    try:
+        psa = a.pubsub(); psb = b.pubsub()
+        psa.subscribe("ch"); psb.subscribe("ch")
+        _drain_subscribe_acks(psa, 1)
+        _drain_subscribe_acks(psb, 1)
+
+        assert pub.publish("ch", "broadcast") == 2
+
+        for ps in (psa, psb):
+            m = ps.get_message(timeout=1)
+            assert m["type"] == "message"
+            assert m["data"] == b"broadcast"
+    finally:
+        psa.close(); psb.close()
+        a.close(); b.close(); pub.close()
+
+
+def test_pubsub_pattern_subscribe_receives_matching_channels(miniredis_server):
+    host, port = miniredis_server
+    sub = redis.Redis(host=host, port=port)
+    pub = redis.Redis(host=host, port=port)
+    try:
+        ps = sub.pubsub()
+        ps.psubscribe("news.*")
+        _drain_subscribe_acks(ps, 1)
+
+        assert pub.publish("news.tech", "story") == 1
+
+        m = ps.get_message(timeout=1)
+        assert m["type"] == "pmessage"
+        assert m["pattern"] == b"news.*"
+        assert m["channel"] == b"news.tech"
+        assert m["data"] == b"story"
+
+        # A channel that doesn't match the pattern: no message arrives.
+        pub.publish("alerts.urgent", "x")
+        assert ps.get_message(timeout=0.2) is None
+    finally:
+        ps.close()
+        sub.close()
+        pub.close()
+
+
+def test_pubsub_unsubscribe_stops_delivery(miniredis_server):
+    host, port = miniredis_server
+    sub = redis.Redis(host=host, port=port)
+    pub = redis.Redis(host=host, port=port)
+    try:
+        ps = sub.pubsub()
+        ps.subscribe("ch")
+        _drain_subscribe_acks(ps, 1)
+
+        assert pub.publish("ch", "first") == 1
+        m1 = ps.get_message(timeout=1)
+        assert m1["data"] == b"first"
+
+        ps.unsubscribe("ch")
+        _drain_subscribe_acks(ps, 1)   # the unsubscribe ack itself
+
+        # After unsubscribe, no subscribers -> publisher reports 0.
+        assert pub.publish("ch", "second") == 0
+        assert ps.get_message(timeout=0.2) is None
+    finally:
+        ps.close()
+        sub.close()
+        pub.close()
+
+
+def test_pubsub_non_pubsub_command_in_subscribe_mode_is_rejected(miniredis_server):
+    # While subscribed, you can't issue arbitrary commands on the same connection.
+    host, port = miniredis_server
+    sub = redis.Redis(host=host, port=port)
+    try:
+        ps = sub.pubsub()
+        ps.subscribe("ch")
+        _drain_subscribe_acks(ps, 1)
+        # Send a GET through the raw connection of the pubsub object.
+        ps.connection.send_command("GET", "k")
+        with pytest.raises(redis.exceptions.ResponseError, match="in this context"):
+            ps.connection.read_response()
+    finally:
+        ps.close()
+        sub.close()
+
+
+def test_pubsub_ping_works_while_subscribed(miniredis_server):
+    host, port = miniredis_server
+    sub = redis.Redis(host=host, port=port)
+    try:
+        ps = sub.pubsub()
+        ps.subscribe("ch")
+        _drain_subscribe_acks(ps, 1)
+        # PING is whitelisted in subscribe mode; should not error.
+        ps.connection.send_command("PING")
+        assert ps.connection.read_response() == b"PONG"
+    finally:
+        ps.close()
+        sub.close()
+
+
+def test_pubsub_subscribe_rejected_inside_multi(client):
+    # We disallow SUBSCRIBE (and family) inside MULTI: the queue-time error
+    # marks the transaction aborted and EXEC returns EXECABORT.
+    raw = client.connection_pool.get_connection()
+    try:
+        raw.send_command("MULTI")
+        assert raw.read_response() == b"OK"
+        raw.send_command("SUBSCRIBE", "x")
+        with pytest.raises(redis.exceptions.ResponseError,
+                            match="not allowed in transactions"):
+            raw.read_response()
+        raw.send_command("EXEC")
+        with pytest.raises(redis.exceptions.ResponseError, match="discarded"):
+            raw.read_response()
+    finally:
+        client.connection_pool.release(raw)
