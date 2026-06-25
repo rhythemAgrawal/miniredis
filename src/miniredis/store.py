@@ -11,6 +11,7 @@ from pathlib import Path
 from miniredis.custom_data_structures import RandomDict, SortedSet
 from miniredis import _rdb
 from miniredis.config import get_settings
+from miniredis.aof import get_temp_aof, get_main_aof
 
 
 snapshot_pid = None
@@ -41,11 +42,18 @@ class Store:
                         continue
 
                     if os.WIFEXITED(status):
-                        logger.info(f"child {pid} exited, code {os.WEXITSTATUS(status)}")
+                        if os.WEXITSTATUS(status) == 1:
+                            logger.error(f"child {pid} exited, code {os.WEXITSTATUS(status)}")
+                        elif os.WEXITSTATUS(status) == 0:
+                            logger.info(f"child {pid} exited, code {os.WEXITSTATUS(status)}")
+                            temp_aof = get_temp_aof()
+                            temp_aof.close()
+                            main_aof = get_main_aof()
+                            main_aof.close()
+                            os.replace(Path(settings.aof_temp_file_path), Path(settings.aof_main_file_path))
+                            main_aof.open()
                     elif os.WIFSIGNALED(status):
-                        logger.info(f"child {pid} killed by signal {os.WTERMSIG(status)}")
-                    
-                    return
+                        logger.error(f"child {pid} killed by signal {os.WTERMSIG(status)}")
                 
                 os.kill(snapshot_pid, signal.SIGKILL)
                 os.waitpid(snapshot_pid, 0)
@@ -53,6 +61,10 @@ class Store:
                 logger.error("Error while running snapshot process cleaner", error=e)
             finally:
                 snapshot_pid = None
+                temp_aof = get_temp_aof()
+                if not temp_aof.file.closed:
+                    temp_aof.close()
+                    Path(settings.aof_temp_file_path).unlink(missing_ok=True)
                 gc.unfreeze()
 
         global snapshot_pid
@@ -64,7 +76,13 @@ class Store:
         settings = get_settings()
         path = settings.snapshot_path
         gc.freeze()
-        pid = os.fork()
+
+        try:
+            pid = os.fork()
+        except Exception as e:
+            logger.error(f"Error on process fork: {e}")
+            gc.unfreeze()
+            return
 
         if pid == 0:
             # Child process
@@ -78,6 +96,17 @@ class Store:
 
             os._exit(0)
         else:
+            try:
+                Path(settings.aof_temp_file_path).unlink(missing_ok=True)
+                temp_aof = get_temp_aof()
+                temp_aof.open()
+            except Exception as e:
+                logger.error(f"Failed to open temp AOF while saving snapshot: {e}")
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+                gc.unfreeze()
+                return
+            
             snapshot_pid = pid
             await child_cleaner()
 
@@ -159,6 +188,17 @@ class Store:
             return 0
         
         self._ttl.set(key, time.time() + ttl)
+        return 1
+    
+    def pexpireat(self, key: bytes, ttl: int) -> int:
+        if not self.exists(key):
+            return 0
+        
+        if ttl < time.time() * 1000:
+            self.delete(key)
+            return 0
+        
+        self._ttl.set(key, ttl/1000)
         return 1
     
     def ttl(self, key: bytes) -> int:
@@ -415,8 +455,9 @@ async def expiration_sweeper(store: Store) -> None:
         store.sample_and_expire()
 
 async def schedule_snapshot(store: Store) -> None:
+    settings = get_settings()
     while True:
-        await asyncio.sleep(3600)
+        await asyncio.sleep(settings.snapshot_interval)
 
         try:
             logger.info("Running snapshot save")
@@ -440,3 +481,7 @@ def get_store() -> Store:
     return store
 
 store = get_store()
+
+def is_dump_in_progress() -> bool:
+    global snapshot_pid
+    return snapshot_pid is not None

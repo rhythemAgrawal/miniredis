@@ -2,12 +2,14 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import NamedTuple
 import math
+import time
 
-from miniredis.protocol import encode_error, encode_simple_string, encode_bulk_string, encode_integer, encode_array
+from miniredis.protocol import encode_error, encode_simple_string, encode_bulk_string, encode_integer, encode_array, resp_encode_command
 from miniredis.store import store
 from miniredis.custom_data_structures import SortedSet
 from miniredis.client import ClientState
 from miniredis.pubsub import channel_registry
+from miniredis.aof import append_to_aof
 
 
 # ---------------------------------------------------------------------------
@@ -34,7 +36,7 @@ async def set(argv: list[bytes]) -> bytes:
     if len(argv) == 2:
         store.set(argv[0], argv[1])
         return encode_simple_string("OK")
-    if len(argv) == 4 and argv[2].upper() in [b"EX", b"PX"]:
+    if len(argv) == 4 and argv[2].upper() in [b"EX", b"PX", b"PXAT"]:
         try:
             ttl = int(argv[3].decode())
         except ValueError:
@@ -46,7 +48,11 @@ async def set(argv: list[bytes]) -> bytes:
         if ttl <= 0:
             return encode_error("ERR invalid expire time in SET command")
 
-        store.set(argv[0], argv[1], ttl)
+        if argv[2].upper() == b"PXAT":
+            store.set(argv[0], argv[1])
+            store.pexpireat(argv[0], ttl)
+        else:
+            store.set(argv[0], argv[1], ttl)
         return encode_simple_string("OK")
 
     # argc is in [2, 4] (dispatch enforces) but the option-form (3 args) or a
@@ -99,7 +105,7 @@ async def strlen(argv: list[bytes]) -> bytes:
 
 async def expire(argv: list[bytes]) -> bytes:
     try:
-        ttl = float(argv[1].decode())
+        ttl = int(argv[1].decode())
     except ValueError:
         return encode_error("ERR Wrong ttl type")
 
@@ -107,6 +113,17 @@ async def expire(argv: list[bytes]) -> bytes:
         return encode_error("ERR Invalid ttl value for EXPIRE command")
 
     return encode_integer(store.expire(argv[0], ttl))
+
+async def pexpireat(argv: list[bytes]) -> bytes:
+    try:
+        ttl = int(argv[1].decode())
+    except ValueError:
+        return encode_error("ERR Wrong ttl type")
+    
+    if ttl <= 0:
+        return encode_error("ERR Invalid ttl value for EXPIRE command")
+    
+    return encode_integer(store.pexpireat(argv[0], ttl))
 
 async def ttl(argv: list[bytes]) -> bytes:
     return encode_integer(store.ttl(argv[0]))
@@ -272,12 +289,20 @@ async def exec(argv: list[bytes], client: ClientState) -> bytes:
     commands = client.get_commands()
     client.clear_transaction()
     responses = []
+    append_transaction = encode_array([encode_bulk_string(b"MULTI")])
+    had_writes = False
 
     for command in commands:
         # NOTE: atomicity depends on handlers not yielding internally
-        response = await dispatch(command, client)
+        response, append_cmd = await dispatch(command, client)
         responses.append(response)
-
+        if append_cmd:
+            had_writes = True
+            append_transaction += append_cmd
+    
+    if had_writes:
+        append_transaction += encode_array([encode_bulk_string(b"EXEC")])
+        append_to_aof(append_transaction)
     return encode_array(responses)
 
 async def discard(argv: list[bytes], client: ClientState) -> bytes:
@@ -324,43 +349,45 @@ class Command(NamedTuple):
     # means unbounded. Dispatch enforces this before queueing/executing.
     min_args: int = 0
     max_args: int | None = None
+    replay: bool = False
 
 
 COMMANDS: dict[bytes, Command] = {
     b"PING":          Command(ping, None, 0, 1),
     b"ECHO":          Command(echo, None, 1, 1),
     b"GET":           Command(get, bytes, 1, 1),
-    b"SET":           Command(set, bytes, 2, 4),
-    b"DEL":           Command(delete, None, 1, None),
+    b"SET":           Command(set, bytes, 2, 4, True),
+    b"DEL":           Command(delete, None, 1, None, True),
     b"EXISTS":        Command(exists, None, 1, None),
-    b"INCRBY":        Command(incrby, bytes, 2, 2),
-    b"DECRBY":        Command(decrby, bytes, 2, 2),
-    b"INCR":          Command(incr, bytes, 1, 1),
-    b"DECR":          Command(decr, bytes, 1, 1),
-    b"APPEND":        Command(append, bytes, 2, 2),
+    b"INCRBY":        Command(incrby, bytes, 2, 2, True),
+    b"DECRBY":        Command(decrby, bytes, 2, 2, True),
+    b"INCR":          Command(incr, bytes, 1, 1, True),
+    b"DECR":          Command(decr, bytes, 1, 1, True),
+    b"APPEND":        Command(append, bytes, 2, 2, True),
     b"STRLEN":        Command(strlen, bytes, 1, 1),
-    b"EXPIRE":        Command(expire, None, 2, 2),
+    b"EXPIRE":        Command(expire, None, 2, 2, True),
+    b"PEXPIREAT":     Command(pexpireat, None, 2, 2, True),
     b"TTL":           Command(ttl, None, 1, 1),
-    b"PERSIST":       Command(persist, None, 1, 1),
-    b"LPUSH":         Command(lpush, deque, 2, None),
-    b"RPUSH":         Command(rpush, deque, 2, None),
-    b"LPOP":          Command(lpop, deque, 1, 2),
-    b"RPOP":          Command(rpop, deque, 1, 2),
+    b"PERSIST":       Command(persist, None, 1, 1, True),
+    b"LPUSH":         Command(lpush, deque, 2, None, True),
+    b"RPUSH":         Command(rpush, deque, 2, None, True),
+    b"LPOP":          Command(lpop, deque, 1, 2, True),
+    b"RPOP":          Command(rpop, deque, 1, 2, True),
     b"LRANGE":        Command(lrange, deque, 3, 3),
     b"LLEN":          Command(llen, deque, 1, 1),
     b"HGET":          Command(hget, dict, 2, 2),
-    b"HSET":          Command(hset, dict, 3, None),
-    b"HDEL":          Command(hdel, dict, 2, None),
+    b"HSET":          Command(hset, dict, 3, None, True),
+    b"HDEL":          Command(hdel, dict, 2, None, True),
     b"HGETALL":       Command(hgetall, dict, 1, 1),
     b"HKEYS":         Command(hkeys, dict, 1, 1),
     b"HVALS":         Command(hvals, dict, 1, 1),
     b"HLEN":          Command(hlen, dict, 1, 1),
-    b"ZADD":          Command(zadd, SortedSet, 3, None),
+    b"ZADD":          Command(zadd, SortedSet, 3, None, True),
     b"ZSCORE":        Command(zscore, SortedSet, 2, 2),
     b"ZRANK":         Command(zrank, SortedSet, 2, 2),
     b"ZRANGE":        Command(zrange, SortedSet, 3, 3),
     b"ZRANGEBYSCORE": Command(zrangebyscore, SortedSet, 3, 3),
-    b"ZREM":          Command(zrem, SortedSet, 2, None),
+    b"ZREM":          Command(zrem, SortedSet, 2, None, True),
     b"MULTI":         Command(multi, None, 0, 0),
     b"EXEC":          Command(exec, None, 0, 0),
     b"DISCARD":       Command(discard, None, 0, 0),
@@ -376,9 +403,11 @@ SUBSCRIBE_MODE_WHITELIST = {b"SUBSCRIBE", b"PSUBSCRIBE", b"UNSUBSCRIBE", b"PUNSU
 NEEDS_CLIENT = {b"MULTI", b"EXEC", b"DISCARD", b"SUBSCRIBE", b"PSUBSCRIBE", b"UNSUBSCRIBE", b"PUNSUBSCRIBE"}
 NOT_ALLOWED_IN_MULTI = {b"SUBSCRIBE", b"PSUBSCRIBE", b"UNSUBSCRIBE", b"PUNSUBSCRIBE"}
 
-async def dispatch(command_args: list[bytes], client: ClientState) -> bytes | None:
+async def dispatch(command_args: list[bytes], client: ClientState) -> tuple[bytes | None, bytes | None]:
+    append_cmd = None
+
     if not command_args:
-        return encode_error("ERR empty command")
+        return encode_error("ERR empty command"), append_cmd
 
     command_name = command_args[0].upper()
     command = COMMANDS.get(command_name)
@@ -387,11 +416,11 @@ async def dispatch(command_args: list[bytes], client: ClientState) -> bytes | No
         if client.in_transaction:
             client.mark_transaction_as_aborted()
             if command_name in NOT_ALLOWED_IN_MULTI:
-                return encode_error(f"ERR '{command_name.decode()}' command not allowed in transactions")
-        return encode_error(f"ERR Invalid command '{command_name.decode()}'")
+                return encode_error(f"ERR '{command_name.decode()}' command not allowed in transactions"), append_cmd
+        return encode_error(f"ERR Invalid command '{command_name.decode()}'"), append_cmd
     
     if client.is_subscribed and command_name not in SUBSCRIBE_MODE_WHITELIST:
-        return encode_error(f"ERR Can't execute '{command_name.decode()}' command in this context")
+        return encode_error(f"ERR Can't execute '{command_name.decode()}' command in this context"), append_cmd
 
     argc = len(command_args) - 1   # not counting the command name itself
     # NOTE: `command.max_args is not None` (vs. just `command.max_args`) so
@@ -401,18 +430,74 @@ async def dispatch(command_args: list[bytes], client: ClientState) -> bytes | No
             client.mark_transaction_as_aborted()
         return encode_error(
             f"ERR wrong number of arguments for '{command_name.decode().lower()}' command"
-        )
+        ), append_cmd
 
     if client.in_transaction and command_name not in SKIP_QUEUE:
         client.add_command(command_args)
-        return encode_simple_string("QUEUED")
+        return encode_simple_string("QUEUED"), append_cmd
 
     if (command.value_type is not None
             and argc >= 1
             and not store.is_valid_value_type(command_args[1], command.value_type)):
-        return encode_error("WRONGTYPE Operation against a key holding the wrong kind of value")
+        return encode_error("WRONGTYPE Operation against a key holding the wrong kind of value"), append_cmd
 
     # Transaction-control handlers take (argv, client); everything else just (argv).
     if command_name in NEEDS_CLIENT:
-        return await command.handler(command_args[1:], client)
-    return await command.handler(command_args[1:])
+        response = await command.handler(command_args[1:], client)
+    else:
+        response = await command.handler(command_args[1:])
+
+    if command.replay and response and not response.startswith(b"-"):
+        if command_name == b"EXPIRE" or (command_name == b"SET" and len(command_args) == 5 and command_args[3] != b"PXAT"):
+            command_args = get_absolute_ttl_cmd(command_args)
+        append_cmd = resp_encode_command(command_args)
+
+    return response, append_cmd
+
+async def replay_dispatch(command_args: list[bytes], state: dict) -> None:
+    """
+    Shorter dispatch method for AOF replays, since only successfully executed
+    commands are appended to aof, we don't need to again check for all the
+    error/validity cases.
+    """
+    command_name = command_args[0].upper()
+    command = COMMANDS.get(command_name)
+
+    if command is None:
+        raise Exception(f"Malformed AOF file. Command '{command_name.decode()}' not found.")
+
+    if command_name == b"MULTI":
+        state["in_transaction"] = True
+        state["queue"] = []
+    elif command_name == b"EXEC":
+        if not state["in_transaction"]:
+            raise Exception("Malformed AOF file. EXEC called when no transaction is in progress.")
+        for sub_command_args in state["queue"]:
+            sub_command_name = sub_command_args[0].upper()
+            sub_command = COMMANDS.get(sub_command_name)
+            if sub_command is None:
+                raise Exception(f"Malformed AOF file. Command '{sub_command_name.decode()}' not found.")
+            await sub_command.handler(sub_command_args[1:])
+        state["in_transaction"] = False
+        state["queue"] = []
+    elif state["in_transaction"]:
+        state["queue"].append(command_args)
+    else:
+        await command.handler(command_args[1:])
+
+def get_absolute_ttl_cmd(command_args: list[bytes]) -> list[bytes]:
+    command_name = command_args[0].upper()
+
+    if command_name == b"EXPIRE":
+        command_args[0] = b"PEXPIREAT"
+        ttl = int(command_args[2].decode())
+        command_args[2] = str(ttl * 1000 + int(time.time()*1000)).encode()
+    elif command_name == b"SET":
+        ttl = int(command_args[4].decode())
+        if command_args[3] == b"EX":
+            ttl = ttl * 1000
+        
+        command_args[3] = b"PXAT"
+        command_args[4] = str(ttl + int(time.time()*1000)).encode()
+    
+    return command_args
