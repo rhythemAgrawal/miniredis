@@ -15,3 +15,7 @@ wheels/
 
 # Env file
 .env
+
+# Data backup files
+*.rdb
+*.aof

@@ -46,6 +46,18 @@ def reset_pubsub_registry():
     channel_registry.pchannel_subs.clear()
 
 
+@pytest.fixture(autouse=True)
+def stub_aof_append(monkeypatch):
+    """Stub out AOF appends -- these tests don't open an AOF.
+
+    ``exec()`` and the dispatch wrapper now call ``append_to_aof``, which
+    crashes against an unopened main_aof. End-to-end AOF behavior is
+    covered in ``test_aof.py``; here we just want the in-memory dispatch
+    logic, so the side-effecting write is replaced with a no-op.
+    """
+    monkeypatch.setattr(commands, "append_to_aof", lambda data: None)
+
+
 @pytest.fixture
 def client() -> ClientState:
     """A fresh per-connection ClientState for tests that go through dispatch."""
@@ -58,17 +70,29 @@ def _int(resp: bytes) -> int:
     return int(resp[1:-2])
 
 
+async def _dispatch(argv, client):
+    """Like ``commands.dispatch`` but returns just the response bytes.
+
+    ``dispatch`` returns ``(response, append_cmd)`` since the AOF feature
+    landed; the tests in this file predate that change and only inspect
+    the response. The wrapper preserves their original shape so we don't
+    have to unpack at 130 call sites.
+    """
+    response, _ = await commands.dispatch(argv, client)
+    return response
+
+
 class TestDispatch:
     async def test_empty_command_is_an_error(self, client):
-        assert (await commands.dispatch([], client)).startswith(b"-ERR")
+        assert (await _dispatch([], client)).startswith(b"-ERR")
 
     async def test_unknown_command_reports_the_name(self, client):
-        resp = await commands.dispatch([b"NOPE"], client)
+        resp = await _dispatch([b"NOPE"], client)
         assert resp.startswith(b"-ERR")
         assert b"NOPE" in resp
 
     async def test_command_name_is_case_insensitive(self, client):
-        assert await commands.dispatch([b"ping"], client) == b"+PONG\r\n"
+        assert await _dispatch([b"ping"], client) == b"+PONG\r\n"
 
 
 class TestPingEcho:
@@ -80,13 +104,13 @@ class TestPingEcho:
 
     async def test_ping_with_too_many_args_errors(self, client):
         # Arity validation lives in dispatch now; PING is (0, 1).
-        assert (await commands.dispatch([b"PING", b"a", b"b"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"PING", b"a", b"b"], client)).startswith(b"-ERR")
 
     async def test_echo(self):
         assert await commands.echo([b"hi"]) == b"$2\r\nhi\r\n"
 
     async def test_echo_wrong_arity_errors(self, client):
-        assert (await commands.dispatch([b"ECHO"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"ECHO"], client)).startswith(b"-ERR")
 
 
 class TestGetSet:
@@ -101,7 +125,7 @@ class TestGetSet:
         assert (await commands.set([b"only"])).startswith(b"-ERR")
 
     async def test_get_wrong_arity_errors(self, client):
-        assert (await commands.dispatch([b"GET", b"a", b"b"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"GET", b"a", b"b"], client)).startswith(b"-ERR")
 
     async def test_set_with_ex_sets_ttl_in_seconds(self):
         assert await commands.set([b"k", b"v", b"EX", b"100"]) == b"+OK\r\n"
@@ -128,7 +152,7 @@ class TestDelExists:
         assert _int(await commands.delete([b"a", b"b", b"missing"])) == 2
 
     async def test_del_wrong_arity_errors(self, client):
-        assert (await commands.dispatch([b"DEL"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"DEL"], client)).startswith(b"-ERR")
 
     async def test_exists_counts_present(self):
         await commands.set([b"a", b"1"])
@@ -153,7 +177,7 @@ class TestCounters:
         assert (await commands.incr([b"c"])).startswith(b"-ERR")
 
     async def test_incrby_wrong_arity_errors(self, client):
-        assert (await commands.dispatch([b"INCRBY", b"c"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"INCRBY", b"c"], client)).startswith(b"-ERR")
 
 
 class TestAppendStrlen:
@@ -167,7 +191,7 @@ class TestAppendStrlen:
         assert _int(await commands.strlen([b"k"])) == 5
 
     async def test_strlen_wrong_arity_errors(self, client):
-        assert (await commands.dispatch([b"STRLEN"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"STRLEN"], client)).startswith(b"-ERR")
 
 
 class TestExpiry:
@@ -204,8 +228,8 @@ class TestListCommands:
         assert _int(await commands.lpush([b"l", b"a", b"b"])) == 2
 
     async def test_push_wrong_arity_errors(self, client):
-        assert (await commands.dispatch([b"RPUSH", b"l"], client)).startswith(b"-ERR")
-        assert (await commands.dispatch([b"LPUSH", b"l"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"RPUSH", b"l"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"LPUSH", b"l"], client)).startswith(b"-ERR")
 
     async def test_lrange_returns_array_of_bulk_strings(self):
         await commands.rpush([b"l", b"a", b"b", b"c"])
@@ -219,7 +243,7 @@ class TestListCommands:
         assert (await commands.lrange([b"l", b"x", b"1"])).startswith(b"-ERR")
 
     async def test_lrange_wrong_arity_errors(self, client):
-        assert (await commands.dispatch([b"LRANGE", b"l", b"0"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"LRANGE", b"l", b"0"], client)).startswith(b"-ERR")
 
     async def test_lpop_without_count_returns_bulk_string(self):
         await commands.rpush([b"l", b"a", b"b"])
@@ -248,7 +272,7 @@ class TestListCommands:
         assert (await commands.lpop([b"l", b"x"])).startswith(b"-ERR")
 
     async def test_lpop_too_many_args_errors(self, client):
-        assert (await commands.dispatch([b"LPOP", b"l", b"1", b"extra"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"LPOP", b"l", b"1", b"extra"], client)).startswith(b"-ERR")
 
     async def test_llen(self):
         await commands.rpush([b"l", b"a", b"b"])
@@ -263,7 +287,7 @@ class TestHashCommands:
         assert (await commands.hset([b"h", b"a"])).startswith(b"-ERR")  # missing value
 
     async def test_hset_too_few_args_errors(self, client):
-        assert (await commands.dispatch([b"HSET", b"h"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"HSET", b"h"], client)).startswith(b"-ERR")
 
     async def test_hget(self):
         await commands.hset([b"h", b"f", b"v"])
@@ -274,14 +298,14 @@ class TestHashCommands:
         assert await commands.hget([b"h", b"nope"]) == b"$-1\r\n"
 
     async def test_hget_wrong_arity_errors(self, client):
-        assert (await commands.dispatch([b"HGET", b"h"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"HGET", b"h"], client)).startswith(b"-ERR")
 
     async def test_hdel_returns_count(self):
         await commands.hset([b"h", b"a", b"1", b"b", b"2"])
         assert _int(await commands.hdel([b"h", b"a", b"missing"])) == 1
 
     async def test_hdel_wrong_arity_errors(self, client):
-        assert (await commands.dispatch([b"HDEL", b"h"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"HDEL", b"h"], client)).startswith(b"-ERR")
 
     async def test_hgetall_returns_flat_array(self):
         await commands.hset([b"h", b"a", b"1", b"b", b"2"])
@@ -303,39 +327,39 @@ class TestHashCommands:
 
 class TestWrongType:
     async def test_string_command_on_a_list_key(self, client):
-        await commands.dispatch([b"RPUSH", b"l", b"a"], client)
-        assert (await commands.dispatch([b"GET", b"l"], client)).startswith(b"-WRONGTYPE")
+        await _dispatch([b"RPUSH", b"l", b"a"], client)
+        assert (await _dispatch([b"GET", b"l"], client)).startswith(b"-WRONGTYPE")
 
     async def test_list_command_on_a_string_key(self, client):
-        await commands.dispatch([b"SET", b"s", b"v"], client)
-        assert (await commands.dispatch([b"LPUSH", b"s", b"a"], client)).startswith(b"-WRONGTYPE")
+        await _dispatch([b"SET", b"s", b"v"], client)
+        assert (await _dispatch([b"LPUSH", b"s", b"a"], client)).startswith(b"-WRONGTYPE")
 
     async def test_hash_command_on_a_string_key(self, client):
-        await commands.dispatch([b"SET", b"s", b"v"], client)
-        assert (await commands.dispatch([b"HSET", b"s", b"f", b"v"], client)).startswith(b"-WRONGTYPE")
+        await _dispatch([b"SET", b"s", b"v"], client)
+        assert (await _dispatch([b"HSET", b"s", b"f", b"v"], client)).startswith(b"-WRONGTYPE")
 
     async def test_list_command_on_a_hash_key(self, client):
-        await commands.dispatch([b"HSET", b"h", b"f", b"v"], client)
-        assert (await commands.dispatch([b"LPUSH", b"h", b"a"], client)).startswith(b"-WRONGTYPE")
+        await _dispatch([b"HSET", b"h", b"f", b"v"], client)
+        assert (await _dispatch([b"LPUSH", b"h", b"a"], client)).startswith(b"-WRONGTYPE")
 
     async def test_type_agnostic_commands_work_across_types(self, client):
-        await commands.dispatch([b"RPUSH", b"l", b"a"], client)
-        assert await commands.dispatch([b"DEL", b"l"], client) == b":1\r\n"
-        await commands.dispatch([b"HSET", b"h", b"f", b"v"], client)
-        assert await commands.dispatch([b"EXISTS", b"h"], client) == b":1\r\n"
+        await _dispatch([b"RPUSH", b"l", b"a"], client)
+        assert await _dispatch([b"DEL", b"l"], client) == b":1\r\n"
+        await _dispatch([b"HSET", b"h", b"f", b"v"], client)
+        assert await _dispatch([b"EXISTS", b"h"], client) == b":1\r\n"
 
     async def test_missing_key_passes_the_type_check(self, client):
         # A command against a missing key should run, not raise WRONGTYPE.
-        assert await commands.dispatch([b"GET", b"missing"], client) == b"$-1\r\n"
-        assert _int(await commands.dispatch([b"LPUSH", b"newlist", b"a"], client)) == 1
+        assert await _dispatch([b"GET", b"missing"], client) == b"$-1\r\n"
+        assert _int(await _dispatch([b"LPUSH", b"newlist", b"a"], client)) == 1
 
     async def test_sorted_set_command_on_a_string_key(self, client):
-        await commands.dispatch([b"SET", b"s", b"v"], client)
-        assert (await commands.dispatch([b"ZADD", b"s", b"1", b"a"], client)).startswith(b"-WRONGTYPE")
+        await _dispatch([b"SET", b"s", b"v"], client)
+        assert (await _dispatch([b"ZADD", b"s", b"1", b"a"], client)).startswith(b"-WRONGTYPE")
 
     async def test_string_command_on_a_sorted_set_key(self, client):
-        await commands.dispatch([b"ZADD", b"z", b"1", b"a"], client)
-        assert (await commands.dispatch([b"GET", b"z"], client)).startswith(b"-WRONGTYPE")
+        await _dispatch([b"ZADD", b"z", b"1", b"a"], client)
+        assert (await _dispatch([b"GET", b"z"], client)).startswith(b"-WRONGTYPE")
 
 
 class TestSortedSetCommands:
@@ -360,7 +384,7 @@ class TestSortedSetCommands:
         assert await commands.zscore([b"z", b"a"]) == b"$-1\r\n"
 
     async def test_zscore_wrong_arity_errors(self, client):
-        assert (await commands.dispatch([b"ZSCORE", b"z"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"ZSCORE", b"z"], client)).startswith(b"-ERR")
 
     async def test_zrank(self):
         await commands.zadd([b"z", b"1", b"a", b"2", b"b"])
@@ -400,7 +424,7 @@ class TestSortedSetCommands:
         assert _int(await commands.zrem([b"z", b"a", b"missing"])) == 1
 
     async def test_zrem_wrong_arity_errors(self, client):
-        assert (await commands.dispatch([b"ZREM", b"z"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"ZREM", b"z"], client)).startswith(b"-ERR")
 
     async def test_zadd_and_zscore_with_infinity(self):
         await commands.zadd([b"z", b"+inf", b"a", b"-inf", b"b", b"5", b"c"])
@@ -424,19 +448,19 @@ class TestTransactionBasics:
     """
 
     async def test_multi_returns_ok_and_enters_transaction(self, client):
-        assert await commands.dispatch([b"MULTI"], client) == b"+OK\r\n"
+        assert await _dispatch([b"MULTI"], client) == b"+OK\r\n"
         assert client.in_transaction is True
 
     async def test_command_inside_multi_returns_queued(self, client):
-        await commands.dispatch([b"MULTI"], client)
-        assert await commands.dispatch([b"SET", b"k", b"v"], client) == b"+QUEUED\r\n"
-        assert await commands.dispatch([b"INCR", b"counter"], client) == b"+QUEUED\r\n"
+        await _dispatch([b"MULTI"], client)
+        assert await _dispatch([b"SET", b"k", b"v"], client) == b"+QUEUED\r\n"
+        assert await _dispatch([b"INCR", b"counter"], client) == b"+QUEUED\r\n"
 
     async def test_queue_preserves_insertion_order(self, client):
-        await commands.dispatch([b"MULTI"], client)
-        await commands.dispatch([b"SET", b"a", b"1"], client)
-        await commands.dispatch([b"SET", b"b", b"2"], client)
-        await commands.dispatch([b"SET", b"c", b"3"], client)
+        await _dispatch([b"MULTI"], client)
+        await _dispatch([b"SET", b"a", b"1"], client)
+        await _dispatch([b"SET", b"b", b"2"], client)
+        await _dispatch([b"SET", b"c", b"3"], client)
         assert client.get_commands() == [
             [b"SET", b"a", b"1"],
             [b"SET", b"b", b"2"],
@@ -444,111 +468,111 @@ class TestTransactionBasics:
         ]
 
     async def test_exec_runs_queued_commands_in_order(self, client):
-        await commands.dispatch([b"MULTI"], client)
-        await commands.dispatch([b"SET", b"a", b"1"], client)
-        await commands.dispatch([b"INCR", b"a"], client)
-        await commands.dispatch([b"GET", b"a"], client)
+        await _dispatch([b"MULTI"], client)
+        await _dispatch([b"SET", b"a", b"1"], client)
+        await _dispatch([b"INCR", b"a"], client)
+        await _dispatch([b"GET", b"a"], client)
         # EXEC returns RESP array: [+OK, :2, $1\r\n2]
-        assert await commands.dispatch([b"EXEC"], client) == \
+        assert await _dispatch([b"EXEC"], client) == \
             b"*3\r\n+OK\r\n:2\r\n$1\r\n2\r\n"
 
     async def test_exec_clears_transaction_state(self, client):
-        await commands.dispatch([b"MULTI"], client)
-        await commands.dispatch([b"SET", b"k", b"v"], client)
-        await commands.dispatch([b"EXEC"], client)
+        await _dispatch([b"MULTI"], client)
+        await _dispatch([b"SET", b"k", b"v"], client)
+        await _dispatch([b"EXEC"], client)
         assert client.in_transaction is False
         assert client.get_commands() == []
         assert client.abort_transaction is False
 
     async def test_discard_clears_state_and_returns_ok(self, client):
-        await commands.dispatch([b"MULTI"], client)
-        await commands.dispatch([b"SET", b"k", b"v"], client)
-        assert await commands.dispatch([b"DISCARD"], client) == b"+OK\r\n"
+        await _dispatch([b"MULTI"], client)
+        await _dispatch([b"SET", b"k", b"v"], client)
+        assert await _dispatch([b"DISCARD"], client) == b"+OK\r\n"
         assert client.in_transaction is False
         assert client.get_commands() == []
         # And the SET was not applied (it was only queued, never executed).
-        assert await commands.dispatch([b"GET", b"k"], client) == b"$-1\r\n"
+        assert await _dispatch([b"GET", b"k"], client) == b"$-1\r\n"
 
     async def test_empty_multi_exec_returns_empty_array(self, client):
-        await commands.dispatch([b"MULTI"], client)
-        assert await commands.dispatch([b"EXEC"], client) == b"*0\r\n"
+        await _dispatch([b"MULTI"], client)
+        assert await _dispatch([b"EXEC"], client) == b"*0\r\n"
 
 
 class TestTransactionControlOutsideMulti:
     async def test_exec_without_multi_returns_error(self, client):
-        resp = await commands.dispatch([b"EXEC"], client)
+        resp = await _dispatch([b"EXEC"], client)
         assert resp.startswith(b"-ERR")
         assert b"without MULTI" in resp
 
     async def test_discard_without_multi_returns_error(self, client):
-        resp = await commands.dispatch([b"DISCARD"], client)
+        resp = await _dispatch([b"DISCARD"], client)
         assert resp.startswith(b"-ERR")
         assert b"without MULTI" in resp
 
     async def test_nested_multi_returns_error(self, client):
-        await commands.dispatch([b"MULTI"], client)
-        resp = await commands.dispatch([b"MULTI"], client)
+        await _dispatch([b"MULTI"], client)
+        resp = await _dispatch([b"MULTI"], client)
         assert resp.startswith(b"-ERR")
         assert b"nested" in resp
 
     async def test_nested_multi_does_not_break_existing_transaction(self, client):
         # The outer MULTI should still be active; queued commands intact.
-        await commands.dispatch([b"MULTI"], client)
-        await commands.dispatch([b"SET", b"k", b"v"], client)
-        await commands.dispatch([b"MULTI"], client)   # rejected with -ERR
+        await _dispatch([b"MULTI"], client)
+        await _dispatch([b"SET", b"k", b"v"], client)
+        await _dispatch([b"MULTI"], client)   # rejected with -ERR
         assert client.in_transaction is True
         assert client.get_commands() == [[b"SET", b"k", b"v"]]
 
 
 class TestTransactionAbortSemantics:
     async def test_unknown_command_during_multi_aborts_transaction(self, client):
-        await commands.dispatch([b"MULTI"], client)
-        await commands.dispatch([b"SET", b"k", b"v"], client)
+        await _dispatch([b"MULTI"], client)
+        await _dispatch([b"SET", b"k", b"v"], client)
         # Unknown command during MULTI: returns error AND flags the txn aborted.
-        resp = await commands.dispatch([b"NOPE"], client)
+        resp = await _dispatch([b"NOPE"], client)
         assert resp.startswith(b"-ERR")
         assert client.abort_transaction is True
 
         # EXEC must now return EXECABORT and run nothing.
-        exec_resp = await commands.dispatch([b"EXEC"], client)
+        exec_resp = await _dispatch([b"EXEC"], client)
         assert exec_resp.startswith(b"-EXECABORT")
 
         # And the SET was *not* applied. The client is cleanly out of the
         # transaction after EXECABORT, so we can reuse it to inspect.
-        assert await commands.dispatch([b"GET", b"k"], client) == b"$-1\r\n"
+        assert await _dispatch([b"GET", b"k"], client) == b"$-1\r\n"
 
     async def test_execabort_clears_transaction_state(self, client):
         # Regression for the EXECABORT cleanup bug: after a failed
         # transaction, the client must be cleanly out of transaction state
         # so a fresh MULTI works without an intervening DISCARD.
-        await commands.dispatch([b"MULTI"], client)
-        await commands.dispatch([b"NOPE"], client)         # marks abort
-        assert (await commands.dispatch([b"EXEC"], client)).startswith(b"-EXECABORT")
+        await _dispatch([b"MULTI"], client)
+        await _dispatch([b"NOPE"], client)         # marks abort
+        assert (await _dispatch([b"EXEC"], client)).startswith(b"-EXECABORT")
 
         assert client.in_transaction is False
         assert client.abort_transaction is False
         assert client.get_commands() == []
 
         # And a fresh MULTI should succeed immediately.
-        assert await commands.dispatch([b"MULTI"], client) == b"+OK\r\n"
-        assert await commands.dispatch([b"SET", b"k", b"v"], client) == b"+QUEUED\r\n"
-        assert await commands.dispatch([b"EXEC"], client) == b"*1\r\n+OK\r\n"
-        assert await commands.dispatch([b"GET", b"k"], client) == b"$1\r\nv\r\n"
+        assert await _dispatch([b"MULTI"], client) == b"+OK\r\n"
+        assert await _dispatch([b"SET", b"k", b"v"], client) == b"+QUEUED\r\n"
+        assert await _dispatch([b"EXEC"], client) == b"*1\r\n+OK\r\n"
+        assert await _dispatch([b"GET", b"k"], client) == b"$1\r\nv\r\n"
 
     async def test_queue_time_arity_error_aborts_transaction(self, client):
-        await commands.dispatch([b"MULTI"], client)
-        await commands.dispatch([b"SET", b"k", b"v"], client)
+        await _dispatch([b"MULTI"], client)
+        await _dispatch([b"SET", b"k", b"v"], client)
         # GET with no key: arity violation -- caught at queue time by dispatch.
-        resp = await commands.dispatch([b"GET"], client)
+        resp = await _dispatch([b"GET"], client)
         assert resp.startswith(b"-ERR")
         assert client.abort_transaction is True
         # EXEC -> EXECABORT, queued SET not applied.
-        assert (await commands.dispatch([b"EXEC"], client)).startswith(b"-EXECABORT")
+        assert (await _dispatch([b"EXEC"], client)).startswith(b"-EXECABORT")
 
     async def test_discard_clears_abort_flag(self, client):
-        await commands.dispatch([b"MULTI"], client)
-        await commands.dispatch([b"NOPE"], client)   # marks abort
-        await commands.dispatch([b"DISCARD"], client)
+        await _dispatch([b"MULTI"], client)
+        await _dispatch([b"NOPE"], client)   # marks abort
+        await _dispatch([b"DISCARD"], client)
         assert client.abort_transaction is False
         assert client.in_transaction is False
 
@@ -559,32 +583,32 @@ class TestTransactionRuntimeErrors:
 
     async def test_wrongtype_inside_multi_is_a_runtime_error(self, client):
         # WRONGTYPE check is deferred to EXEC time; the command queues fine.
-        await commands.dispatch([b"RPUSH", b"l", b"a"], client)  # `l` is now a list
-        await commands.dispatch([b"MULTI"], client)
+        await _dispatch([b"RPUSH", b"l", b"a"], client)  # `l` is now a list
+        await _dispatch([b"MULTI"], client)
         # Queue a GET on a list-typed key -- queue-time succeeds.
-        assert await commands.dispatch([b"GET", b"l"], client) == b"+QUEUED\r\n"
+        assert await _dispatch([b"GET", b"l"], client) == b"+QUEUED\r\n"
         # Queue a valid LRANGE that comes after.
-        assert await commands.dispatch([b"LRANGE", b"l", b"0", b"-1"], client) == b"+QUEUED\r\n"
+        assert await _dispatch([b"LRANGE", b"l", b"0", b"-1"], client) == b"+QUEUED\r\n"
 
-        resp = await commands.dispatch([b"EXEC"], client)
+        resp = await _dispatch([b"EXEC"], client)
         # Two replies: first is -WRONGTYPE, second is the LRANGE array.
         assert b"-WRONGTYPE" in resp
         assert b"$1\r\na\r\n" in resp   # LRANGE still ran
 
     async def test_hset_parity_error_at_exec_does_not_abort_batch(self, client):
-        await commands.dispatch([b"MULTI"], client)
+        await _dispatch([b"MULTI"], client)
         # HSET with even argv (missing value for second field) -- min_args=3
         # passes dispatch, parity check fires inside the handler at EXEC.
-        assert await commands.dispatch([b"HSET", b"h", b"f1", b"v1", b"f2"], client) \
+        assert await _dispatch([b"HSET", b"h", b"f1", b"v1", b"f2"], client) \
             == b"+QUEUED\r\n"
-        assert await commands.dispatch([b"SET", b"k", b"v"], client) == b"+QUEUED\r\n"
+        assert await _dispatch([b"SET", b"k", b"v"], client) == b"+QUEUED\r\n"
 
-        resp = await commands.dispatch([b"EXEC"], client)
+        resp = await _dispatch([b"EXEC"], client)
         # Two replies in the array: first is the parity error, second is +OK.
         assert b"-ERR wrong number of arguments" in resp
         assert b"+OK" in resp
         # The SET DID get applied -- runtime errors don't abort the batch.
-        assert await commands.dispatch([b"GET", b"k"], client) == b"$1\r\nv\r\n"
+        assert await _dispatch([b"GET", b"k"], client) == b"$1\r\nv\r\n"
 
 
 class TestTransactionIsolation:
@@ -595,29 +619,29 @@ class TestTransactionIsolation:
         a = _make_client()
         b = _make_client()
 
-        await commands.dispatch([b"MULTI"], a)
-        await commands.dispatch([b"SET", b"shared", b"from_a"], a)
+        await _dispatch([b"MULTI"], a)
+        await _dispatch([b"SET", b"shared", b"from_a"], a)
 
         # B is not in a transaction; a normal SET goes through immediately.
-        assert await commands.dispatch([b"SET", b"shared", b"from_b"], b) == b"+OK\r\n"
+        assert await _dispatch([b"SET", b"shared", b"from_b"], b) == b"+OK\r\n"
         # The store now has "from_b" (B's SET applied; A's still queued).
-        assert await commands.dispatch([b"GET", b"shared"], b) == b"$6\r\nfrom_b\r\n"
+        assert await _dispatch([b"GET", b"shared"], b) == b"$6\r\nfrom_b\r\n"
 
         # Now run A's EXEC: it applies the queued SET, overwriting.
-        await commands.dispatch([b"EXEC"], a)
-        assert await commands.dispatch([b"GET", b"shared"], b) == b"$6\r\nfrom_a\r\n"
+        await _dispatch([b"EXEC"], a)
+        assert await _dispatch([b"GET", b"shared"], b) == b"$6\r\nfrom_a\r\n"
 
 
 class TestTransactionMaxArgs:
     async def test_multi_with_extra_args_is_arity_error(self, client):
         # max_args=0 was the bug-fix from earlier; verify it still bites.
-        resp = await commands.dispatch([b"MULTI", b"extra"], client)
+        resp = await _dispatch([b"MULTI", b"extra"], client)
         assert resp.startswith(b"-ERR")
         assert client.in_transaction is False
 
     async def test_exec_with_extra_args_is_arity_error(self, client):
-        await commands.dispatch([b"MULTI"], client)
-        resp = await commands.dispatch([b"EXEC", b"extra"], client)
+        await _dispatch([b"MULTI"], client)
+        resp = await _dispatch([b"EXEC", b"extra"], client)
         # arity error fires; since we're still in a transaction, this also
         # flags abort. EXEC's actual error path doesn't execute.
         assert resp.startswith(b"-ERR")
@@ -628,7 +652,7 @@ class TestPubSubSubscribeReplies:
     dispatch (the handler writes ack frames directly to client.write_buffer)."""
 
     async def test_subscribe_returns_none_and_writes_ack_to_buffer(self, client):
-        resp = await commands.dispatch([b"SUBSCRIBE", b"news"], client)
+        resp = await _dispatch([b"SUBSCRIBE", b"news"], client)
         assert resp is None
         ack = client.write_buffer.get_nowait()
         assert ack.startswith(b"*3\r\n")
@@ -640,7 +664,7 @@ class TestPubSubSubscribeReplies:
         assert client.is_subscribed is True
 
     async def test_psubscribe_returns_none_and_writes_pack_to_buffer(self, client):
-        resp = await commands.dispatch([b"PSUBSCRIBE", b"news.*"], client)
+        resp = await _dispatch([b"PSUBSCRIBE", b"news.*"], client)
         assert resp is None
         ack = client.write_buffer.get_nowait()
         assert b"psubscribe" in ack
@@ -649,11 +673,11 @@ class TestPubSubSubscribeReplies:
 
     async def test_unsubscribe_with_no_args_unsubs_all(self, client):
         # Regression: this used to crash via "set changed size during iteration."
-        await commands.dispatch([b"SUBSCRIBE", b"a", b"b", b"c"], client)
+        await _dispatch([b"SUBSCRIBE", b"a", b"b", b"c"], client)
         # drain the three subscribe acks
         for _ in range(3):
             client.write_buffer.get_nowait()
-        resp = await commands.dispatch([b"UNSUBSCRIBE"], client)
+        resp = await _dispatch([b"UNSUBSCRIBE"], client)
         assert resp is None
         # Three unsubscribe acks follow, in some order.
         msgs = [client.write_buffer.get_nowait() for _ in range(3)]
@@ -666,27 +690,27 @@ class TestSubscribeMode:
     """Once a client is in subscribe mode, only the whitelisted commands work."""
 
     async def test_non_pubsub_command_in_subscribe_mode_is_rejected(self, client):
-        await commands.dispatch([b"SUBSCRIBE", b"x"], client)
+        await _dispatch([b"SUBSCRIBE", b"x"], client)
         client.write_buffer.get_nowait()    # drain the ack
-        resp = await commands.dispatch([b"GET", b"k"], client)
+        resp = await _dispatch([b"GET", b"k"], client)
         assert resp.startswith(b"-ERR")
         assert b"in this context" in resp
 
     async def test_ping_is_allowed_in_subscribe_mode(self, client):
         # PING is the customary heartbeat for subscribers; must not error.
-        await commands.dispatch([b"SUBSCRIBE", b"x"], client)
+        await _dispatch([b"SUBSCRIBE", b"x"], client)
         client.write_buffer.get_nowait()
-        resp = await commands.dispatch([b"PING"], client)
+        resp = await _dispatch([b"PING"], client)
         assert resp == b"+PONG\r\n"
 
     async def test_subscribe_commands_themselves_are_allowed_in_subscribe_mode(self, client):
-        await commands.dispatch([b"SUBSCRIBE", b"x"], client)
+        await _dispatch([b"SUBSCRIBE", b"x"], client)
         client.write_buffer.get_nowait()
         # Can SUBSCRIBE to more, UNSUBSCRIBE, PSUBSCRIBE, PUNSUBSCRIBE freely.
-        assert await commands.dispatch([b"SUBSCRIBE", b"y"], client) is None
-        assert await commands.dispatch([b"PSUBSCRIBE", b"p.*"], client) is None
-        assert await commands.dispatch([b"UNSUBSCRIBE", b"x"], client) is None
-        assert await commands.dispatch([b"PUNSUBSCRIBE", b"p.*"], client) is None
+        assert await _dispatch([b"SUBSCRIBE", b"y"], client) is None
+        assert await _dispatch([b"PSUBSCRIBE", b"p.*"], client) is None
+        assert await _dispatch([b"UNSUBSCRIBE", b"x"], client) is None
+        assert await _dispatch([b"PUNSUBSCRIBE", b"p.*"], client) is None
 
 
 class TestSubscribeInsideMulti:
@@ -697,36 +721,36 @@ class TestSubscribeInsideMulti:
     @pytest.mark.parametrize("cmd", [b"SUBSCRIBE", b"PSUBSCRIBE",
                                       b"UNSUBSCRIBE", b"PUNSUBSCRIBE"])
     async def test_subscribe_family_rejected_in_multi(self, client, cmd):
-        await commands.dispatch([b"MULTI"], client)
-        resp = await commands.dispatch([cmd, b"x"], client)
+        await _dispatch([b"MULTI"], client)
+        resp = await _dispatch([cmd, b"x"], client)
         assert resp.startswith(b"-ERR")
         assert b"not allowed in transactions" in resp
         # And the transaction is now flagged for EXECABORT.
         assert client.abort_transaction is True
-        assert (await commands.dispatch([b"EXEC"], client)).startswith(b"-EXECABORT")
+        assert (await _dispatch([b"EXEC"], client)).startswith(b"-EXECABORT")
 
     async def test_publish_is_queueable_in_multi(self, client):
         # PUBLISH is NOT a pubsub-state-change command and is allowed in MULTI.
-        await commands.dispatch([b"MULTI"], client)
-        queued = await commands.dispatch([b"PUBLISH", b"ch", b"msg"], client)
+        await _dispatch([b"MULTI"], client)
+        queued = await _dispatch([b"PUBLISH", b"ch", b"msg"], client)
         assert queued == b"+QUEUED\r\n"
         # EXEC runs it; with no subscribers the count is 0.
-        result = await commands.dispatch([b"EXEC"], client)
+        result = await _dispatch([b"EXEC"], client)
         assert result == b"*1\r\n:0\r\n"
 
 
 class TestPublishDispatch:
     async def test_publish_with_no_subscribers_returns_zero(self, client):
-        resp = await commands.dispatch([b"PUBLISH", b"ch", b"hi"], client)
+        resp = await _dispatch([b"PUBLISH", b"ch", b"hi"], client)
         assert resp == b":0\r\n"
 
     async def test_publish_delivers_to_subscriber_and_returns_count(self, client):
         sub = _make_client()
         # `sub` subscribes; `client` publishes.
-        await commands.dispatch([b"SUBSCRIBE", b"ch"], sub)
+        await _dispatch([b"SUBSCRIBE", b"ch"], sub)
         sub.write_buffer.get_nowait()    # drain ack
 
-        resp = await commands.dispatch([b"PUBLISH", b"ch", b"hello"], client)
+        resp = await _dispatch([b"PUBLISH", b"ch", b"hello"], client)
         assert resp == b":1\r\n"
         msg = sub.write_buffer.get_nowait()
         assert b"message" in msg
@@ -736,13 +760,13 @@ class TestPublishDispatch:
     async def test_publish_count_includes_pattern_subscribers(self, client):
         direct = _make_client()
         pattern_sub = _make_client()
-        await commands.dispatch([b"SUBSCRIBE", b"news.tech"], direct)
-        await commands.dispatch([b"PSUBSCRIBE", b"news.*"], pattern_sub)
+        await _dispatch([b"SUBSCRIBE", b"news.tech"], direct)
+        await _dispatch([b"PSUBSCRIBE", b"news.*"], pattern_sub)
         # Drain acks
         direct.write_buffer.get_nowait()
         pattern_sub.write_buffer.get_nowait()
 
-        resp = await commands.dispatch([b"PUBLISH", b"news.tech", b"story"], client)
+        resp = await _dispatch([b"PUBLISH", b"news.tech", b"story"], client)
         # 1 direct + 1 pattern = 2 receivers
         assert resp == b":2\r\n"
         # And the right frame went to each.
@@ -751,5 +775,5 @@ class TestPublishDispatch:
 
     async def test_publish_wrong_arity_errors(self, client):
         # PUBLISH has min=2, max=2 (channel + message).
-        assert (await commands.dispatch([b"PUBLISH", b"ch"], client)).startswith(b"-ERR")
-        assert (await commands.dispatch([b"PUBLISH"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"PUBLISH", b"ch"], client)).startswith(b"-ERR")
+        assert (await _dispatch([b"PUBLISH"], client)).startswith(b"-ERR")
