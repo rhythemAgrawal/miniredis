@@ -41,12 +41,14 @@ async def handle_request(reader: asyncio.StreamReader, writer: asyncio.StreamWri
         await writer.wait_closed()
         logger.info("Connection closed with client")
 
-async def main(host="127.0.0.1", port=6380):
+async def main(host=None, port=None):
+    host = host if host is not None else settings.host
+    port = port if port is not None else settings.port
     await replay_commands()
     main_aof = get_main_aof()
     main_aof.open()
     server = await asyncio.start_server(handle_request, host, port)
-    logger.info("Server started")
+    logger.info("Server started", host=host, port=port)
     asyncio.create_task(expiration_sweeper(store))
     asyncio.create_task(schedule_snapshot(store))
 

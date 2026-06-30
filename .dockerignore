@@ -1,0 +1,35 @@
+# Platform-wrong or huge — would corrupt or bloat the runtime image.
+# .venv = macOS binaries (wrong arch + wrong format); *.so = the locally
+# built darwin extension. We compile a fresh Linux .so inside the builder.
+.venv/
+*.so
+
+# Server data files: regenerated at runtime, and rewritten constantly.
+# Leaving them in would bloat the image AND bust the layer cache on every run.
+*.aof
+*.rdb
+
+# Version control + local caches: never needed to build or run.
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.hypothesis/
+
+# Local build leftovers from setup.py / editable installs.
+build/
+dist/
+*.egg-info/
+
+# Secrets / local config — inject these via env vars at `docker run` time,
+# never bake them into a shippable image.
+.env
+**/.env
+
+# Not needed to build or run the package.
+tests/
+.python-version
+.claude/
+Dockerfile
+.dockerignore
