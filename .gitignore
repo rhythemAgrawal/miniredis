@@ -19,6 +19,3 @@ wheels/
 # Data backup files
 *.rdb
 *.aof
-
-# Deploy config
-fly.toml

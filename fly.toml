@@ -1,0 +1,31 @@
+# miniredis — PRIVATE Fly app.
+#
+# There is intentionally NO [[services]] / [http_service] block, so Fly never
+# allocates a public IP. The app is reachable only over the organization's
+# private network (6PN) at  <app-name>.internal:6380  -- which is exactly how
+# the gateway app will dial it. miniredis is never exposed to the internet.
+
+app = "miniredis-demo"          # must be globally unique; if taken, change it
+                                # AND remember the name -- the gateway dials
+                                # <this-name>.internal
+primary_region = "bom"          # Mumbai. Pick one near you; the VOLUME below
+                                # must live in this same region.
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  HOST = "::"                    # IPv6 wildcard. Fly's private network (6PN /
+                                 # .internal) is IPv6-ONLY, so 0.0.0.0 (which is
+                                 # the IPv4-only wildcard) is unreachable over it.
+                                 # "::" listens on IPv6 and dual-stacks to IPv4.
+  PORT = "6380"
+  # AOF/RDB paths already default to /data via the Dockerfile's ENV.
+
+[mounts]
+  source = "miniredis_data"     # the named volume (created below)
+  destination = "/data"         # where persistence lives -> survives restarts
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
