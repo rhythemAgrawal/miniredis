@@ -22,7 +22,7 @@ miniredis speaks the real [RESP-2](https://redis.io/docs/latest/develop/referenc
 
 ## Why this project
 
-I set out to answer a question I couldn't answer confidently from just using Redis: *how does a production in-memory database actually work underneath?* So I rebuilt one — not a toy key-value dict behind a socket, but the parts that make Redis Redis: the wire protocol, the data structures behind sorted sets, the fork-based snapshot trick, crash-safe durability, and the concurrency model. Every design decision below is one I can defend, with the trade-offs I weighed.
+I set out to answer a question I couldn't answer confidently from just using Redis: *how does a production in-memory database actually work underneath?* So I rebuilt one — not a toy key-value dict behind a socket, but the parts that make Redis Redis: the wire protocol, the data structures behind sorted sets, the fork-based snapshot trick, crash-safe durability, and the concurrency model. Each of the design decisions below involved real trade-offs, which I've written up alongside the choice.
 
 It is wire-compatible: point `redis-cli -p 6380` at it and it just works.
 
@@ -172,10 +172,13 @@ flowchart TD
 
 ---
 
-## Design decisions I'd defend in an interview
+## Key design decisions
 
 **Sorted sets on a hand-built skip list.**
 `ZRANGE`/`ZRANK` need ordered iteration *and* `O(log n)` rank lookups. A skip list gives both, and I augmented each forward pointer with a **span** (how many nodes it skips) so rank queries are `O(log n)` instead of a linear walk. The sorted set is a skip list for ordering paired with a dict for `O(1)` score lookups — exactly Redis's `zset` design.
+
+**Key expiration: active sampling + passive eviction, on a custom `RandomDict`.**
+A key with a TTL can expire while no client ever touches it again, so lazy deletion alone would slowly leak memory. miniredis mirrors Redis's two-pronged approach: an expired key is evicted lazily the moment it's next accessed (passive), and a background sweeper periodically samples random TTL-bearing keys and clears the expired ones (active). That sampling has to pull *random* keys in `O(1)` — which a plain dict can't do — so TTLs live in a custom `RandomDict` that keeps a parallel list plus a position index for `O(1)` random selection, the same structure Redis's expiry cycle samples from.
 
 **Snapshots via `fork()` + copy-on-write, not by pausing writes.**
 Naively, snapshotting means "stop accepting writes, serialize everything, resume" — a latency spike no one should ship. Instead `snapshot()` calls `os.fork()`: the child inherits a copy-on-write view of memory and serializes it while the parent keeps serving. `gc.freeze()` is called first so CPython's reference-counting garbage collector doesn't dirty (and thus force a copy of) otherwise-untouched memory pages in the child. The parent reaps the child asynchronously via a non-blocking `waitpid` poll with a timeout-and-`SIGKILL` fallback.
