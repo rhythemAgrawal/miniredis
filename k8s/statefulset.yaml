@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: miniredis
+spec:
+  # Which headless Service provides the per-pod DNS identity (required).
+  serviceName: miniredis-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: miniredis
+  # The pod template: the StatefulSet stamps pods out of this. Its labels
+  # must satisfy the selector above -- the API server rejects a mismatch.
+  template:
+    metadata:
+      labels:
+        app: miniredis
+    spec:
+      containers:
+        - name: miniredis
+          image: miniredis:0.1.0
+          # The kind node has its own image store and cannot see the Mac's
+          # Docker images; `kind load docker-image` copies the image in.
+          # Never forbids registry pulls, so a missing/typo'd tag fails
+          # loudly instead of silently asking Docker Hub.
+          imagePullPolicy: Never
+          ports:
+            - name: resp
+              containerPort: 6380
+          # Every key in the ConfigMap becomes an environment variable.
+          envFrom:
+            - configMapRef:
+                name: miniredis-config
+          volumeMounts:
+            - name: data # matches the volumeClaimTemplate below
+              mountPath: /data # where the Dockerfile points AOF/RDB paths
+  # A claim TEMPLATE, not a claim: each pod gets its own PVC named after the
+  # pod's identity (data-miniredis-0). The claim outlives the pod and even
+  # the StatefulSet itself -- this is the "storage follows identity, not the
+  # machine" mechanism. Delete the pod; the replacement reattaches this claim.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"] # read-write by one node at a time
+        resources:
+          requests:
+            storage: 1Gi

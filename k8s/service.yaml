@@ -1,0 +1,31 @@
+# Headless Service (clusterIP: None): no virtual IP, no load balancing.
+# It exists so the StatefulSet can give each pod a stable DNS name of the
+# form <pod>.<service>.<namespace>.svc.cluster.local, e.g.
+#   miniredis-0.miniredis-headless.default.svc.cluster.local
+# StatefulSets require one (referenced via spec.serviceName).
+apiVersion: v1
+kind: Service
+metadata:
+  name: miniredis-headless
+spec:
+  clusterIP: None
+  selector:
+    app: miniredis
+  ports:
+    - name: resp
+      port: 6380
+---
+# Client-facing Service: one stable virtual IP and DNS name
+# (miniredis.default.svc.cluster.local) that routes to whichever pod
+# currently matches the selector. Clients never learn pod IPs.
+apiVersion: v1
+kind: Service
+metadata:
+  name: miniredis
+spec:
+  selector:
+    app: miniredis
+  ports:
+    - name: resp
+      port: 6380
+      targetPort: resp

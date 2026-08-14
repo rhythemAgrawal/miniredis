@@ -1,0 +1,14 @@
+# Runtime configuration for miniredis, injected as environment variables.
+# A ConfigMap is a string -> string map, so numeric values are quoted here;
+# pydantic-settings (config.py) parses them back into ints on the app side.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: miniredis-config
+data:
+  # In-cluster traffic arrives on the pod's own virtual interface over IPv4,
+  # so the IPv4 wildcard is correct here (unlike Fly's IPv6-only 6PN).
+  HOST: "0.0.0.0"
+  PORT: "6380"
+  FSYNC_POLICY: "EVERYSEC"
+  SNAPSHOT_INTERVAL: "3600"
